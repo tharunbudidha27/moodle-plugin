@@ -1,0 +1,11 @@
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+.phpunit.result.cache
+phpunit.cache/
+tests/coverage/
+*.log
+.env
+/scripts/
