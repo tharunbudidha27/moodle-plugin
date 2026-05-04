@@ -15,3 +15,9 @@ $string['drm_not_configured'] = 'DRM is not configured: {$a}';
 $string['ssrf_blocked'] = 'URL rejected by SSRF guard: {$a}';
 $string['rate_limit_exceeded'] = 'Rate limit exceeded: {$a}';
 $string['credentials_missing'] = 'FastPix credentials are not configured: {$a}';
+
+// Scheduled task names.
+$string['task_orphan_sweeper'] = 'Sweep expired upload sessions';
+$string['task_webhook_event_pruner'] = 'Prune old processed webhook events';
+$string['task_asset_cleanup'] = 'Hard-delete soft-deleted assets past GDPR retention';
+$string['task_signing_key_rotator'] = 'Rotate JWT signing key every 90 days';

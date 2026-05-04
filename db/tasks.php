@@ -12,7 +12,7 @@ $tasks = [
         'month'     => '*',
     ],
     [
-        'classname' => '\local_fastpix\task\prune_webhook_ledger',
+        'classname' => '\local_fastpix\task\webhook_event_pruner',
         'blocking'  => 0,
         'minute'    => '23',
         'hour'      => '4',
@@ -21,7 +21,7 @@ $tasks = [
         'month'     => '*',
     ],
     [
-        'classname' => '\local_fastpix\task\purge_soft_deleted_assets',
+        'classname' => '\local_fastpix\task\asset_cleanup',
         'blocking'  => 0,
         'minute'    => '47',
         'hour'      => '4',
@@ -34,6 +34,15 @@ $tasks = [
         'blocking'  => 0,
         'minute'    => '*/15',
         'hour'      => '*',
+        'day'       => '*',
+        'dayofweek' => '*',
+        'month'     => '*',
+    ],
+    [
+        'classname' => '\local_fastpix\task\signing_key_rotator',
+        'blocking'  => 0,
+        'minute'    => '11',
+        'hour'      => '5',
         'day'       => '*',
         'dayofweek' => '*',
         'month'     => '*',
