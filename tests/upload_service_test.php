@@ -330,6 +330,124 @@ class upload_service_test extends \advanced_testcase {
 
     // ============ E. Persistence ========================================
 
+    // ---- IPv6 SSRF guard tests (T1.3, REVIEW S-2) ------------------------
+    // The existing IPv4 tests above passed with the old guard, but the old
+    // guard used gethostbynamel() which returns A records only — AAAA records
+    // were silently ignored. These IPv6 tests would have all been bypassed
+    // before T1.3.
+
+    public function test_create_url_pull_session_rejects_ipv6_loopback(): void {
+        $mock = $this->createMock(\local_fastpix\api\gateway::class);
+        $mock->expects($this->never())->method('media_create_from_url');
+        $this->inject_gateway_mock($mock);
+
+        try {
+            upload_service::instance()->create_url_pull_session(42, 'https://[::1]/v.mp4');
+            $this->fail('expected ssrf_blocked');
+        } catch (\local_fastpix\exception\ssrf_blocked $e) {
+            $this->assertStringContainsString('blocked_ipv6:', (string)$e->a);
+        }
+    }
+
+    public function test_create_url_pull_session_rejects_ipv6_ula_fd00(): void {
+        $mock = $this->createMock(\local_fastpix\api\gateway::class);
+        $mock->expects($this->never())->method('media_create_from_url');
+        $this->inject_gateway_mock($mock);
+
+        try {
+            upload_service::instance()->create_url_pull_session(42, 'https://[fd00::1]/v.mp4');
+            $this->fail('expected ssrf_blocked');
+        } catch (\local_fastpix\exception\ssrf_blocked $e) {
+            $this->assertStringContainsString('blocked_ipv6:', (string)$e->a);
+        }
+    }
+
+    public function test_create_url_pull_session_rejects_ipv6_ula_fc00(): void {
+        $mock = $this->createMock(\local_fastpix\api\gateway::class);
+        $mock->expects($this->never())->method('media_create_from_url');
+        $this->inject_gateway_mock($mock);
+
+        try {
+            upload_service::instance()->create_url_pull_session(42, 'https://[fc00::1]/v.mp4');
+            $this->fail('expected ssrf_blocked');
+        } catch (\local_fastpix\exception\ssrf_blocked $e) {
+            $this->assertStringContainsString('blocked_ipv6:', (string)$e->a);
+        }
+    }
+
+    public function test_create_url_pull_session_rejects_ipv6_link_local(): void {
+        $mock = $this->createMock(\local_fastpix\api\gateway::class);
+        $mock->expects($this->never())->method('media_create_from_url');
+        $this->inject_gateway_mock($mock);
+
+        try {
+            upload_service::instance()->create_url_pull_session(42, 'https://[fe80::1]/v.mp4');
+            $this->fail('expected ssrf_blocked');
+        } catch (\local_fastpix\exception\ssrf_blocked $e) {
+            $this->assertStringContainsString('blocked_ipv6:', (string)$e->a);
+        }
+    }
+
+    public function test_create_url_pull_session_rejects_ipv6_aws_metadata(): void {
+        $mock = $this->createMock(\local_fastpix\api\gateway::class);
+        $mock->expects($this->never())->method('media_create_from_url');
+        $this->inject_gateway_mock($mock);
+
+        try {
+            upload_service::instance()->create_url_pull_session(42, 'https://[fd00:ec2::254]/latest/meta-data');
+            $this->fail('expected ssrf_blocked');
+        } catch (\local_fastpix\exception\ssrf_blocked $e) {
+            $this->assertStringContainsString('blocked_ipv6:', (string)$e->a);
+        }
+    }
+
+    public function test_create_url_pull_session_rejects_ipv6_nat64(): void {
+        $mock = $this->createMock(\local_fastpix\api\gateway::class);
+        $mock->expects($this->never())->method('media_create_from_url');
+        $this->inject_gateway_mock($mock);
+
+        try {
+            upload_service::instance()->create_url_pull_session(42, 'https://[64:ff9b::a00:1]/v.mp4');
+            $this->fail('expected ssrf_blocked');
+        } catch (\local_fastpix\exception\ssrf_blocked $e) {
+            $this->assertStringContainsString('blocked_ipv6:', (string)$e->a);
+        }
+    }
+
+    public function test_create_url_pull_session_rejects_ipv4_mapped_ipv6_with_private_v4(): void {
+        // ::ffff:192.168.1.1 is RFC4291 IPv4-mapped IPv6; the embedded v4
+        // is RFC1918 private and must be re-validated as IPv4 (recursive
+        // assert_ip_public call), then rejected with the IPv4 error tag.
+        $mock = $this->createMock(\local_fastpix\api\gateway::class);
+        $mock->expects($this->never())->method('media_create_from_url');
+        $this->inject_gateway_mock($mock);
+
+        try {
+            upload_service::instance()->create_url_pull_session(42, 'https://[::ffff:192.168.1.1]/v.mp4');
+            $this->fail('expected ssrf_blocked');
+        } catch (\local_fastpix\exception\ssrf_blocked $e) {
+            // Recursive call into the IPv4 path produces the IPv4 tag.
+            $this->assertStringContainsString('blocked_ip:192.168.1.1', (string)$e->a);
+        }
+    }
+
+    public function test_create_url_pull_session_allows_public_ipv6_literal(): void {
+        // Cloudflare's public DNS server. If this is rejected, the IPv6
+        // private-range checks are too aggressive and would break URL pull
+        // from any IPv6-only public CDN.
+        $mock = $this->createMock(\local_fastpix\api\gateway::class);
+        $mock->expects($this->once())
+            ->method('media_create_from_url')
+            ->willReturn($this->default_url_pull_response());
+        $this->inject_gateway_mock($mock);
+
+        // Should NOT throw ssrf_blocked.
+        $result = upload_service::instance()->create_url_pull_session(
+            42, 'https://[2606:4700:4700::1111]/v.mp4'
+        );
+        $this->assertNotNull($result);
+    }
+
     public function test_url_pull_session_stores_source_url_not_upload_url(): void {
         global $DB;
         $mock = $this->createMock(\local_fastpix\api\gateway::class);

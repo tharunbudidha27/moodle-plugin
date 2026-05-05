@@ -217,20 +217,118 @@ class upload_service {
             throw new ssrf_blocked('non_https');
         }
         $host = strtolower($parts['host'] ?? '');
+        // Strip IPv6 literal brackets if parse_url left them in (varies by
+        // PHP version / build): https://[fe80::1]/x -> host='[fe80::1]'.
+        if (strlen($host) >= 2 && $host[0] === '[' && substr($host, -1) === ']') {
+            $host = substr($host, 1, -1);
+        }
         if ($host === '' || $host === 'localhost' || str_ends_with($host, '.local')) {
             throw new ssrf_blocked('local_host:' . $host);
         }
 
-        $ips = @gethostbynamel($host);
+        // Direct IPv6 host literal? Validate without DNS.
+        if (filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+            $this->assert_ip_public($host);
+            return;
+        }
+        // Direct IPv4 host literal? Validate without DNS.
+        if (filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+            $this->assert_ip_public($host);
+            return;
+        }
+
+        // Hostname: resolve A + AAAA records. dns_get_record returns false on
+        // failure; treat empty/false the same as gethostbynamel did.
+        // TODO(TOCTOU REVIEW-2026-05-04 §S-2): the resolved IP set is checked
+        // here but FastPix's gateway re-resolves at fetch time, opening a DNS
+        // rebinding window. Proper fix needs CURLOPT_RESOLVE-style pinning;
+        // tracked as a Tier 3 item.
+        $records = @dns_get_record($host, DNS_A | DNS_AAAA);
+        if ($records === false || empty($records)) {
+            throw new ssrf_blocked('unresolvable:' . $host);
+        }
+        $ips = [];
+        foreach ($records as $r) {
+            if (isset($r['ip']))    { $ips[] = $r['ip']; }    // A
+            if (isset($r['ipv6']))  { $ips[] = $r['ipv6']; }  // AAAA
+        }
         if (empty($ips)) {
             throw new ssrf_blocked('unresolvable:' . $host);
         }
-
         foreach ($ips as $ip) {
+            $this->assert_ip_public($ip);
+        }
+    }
+
+    /**
+     * Assert that an IP literal (v4 or v6) is publicly routable. Throws
+     * ssrf_blocked with a tag describing the family and reason.
+     *
+     * Per @upload-service guardrail: explicit byte-pattern matching for
+     * private IPv6 ranges, because PHP's FILTER_FLAG_NO_PRIV_RANGE /
+     * NO_RES_RANGE flags do not reliably cover all IPv6 private ranges.
+     */
+    private function assert_ip_public(string $ip): void {
+        // IPv4 path — preserves backward-compatible error tag 'blocked_ip:'
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
             if (!filter_var($ip, FILTER_VALIDATE_IP,
-                FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+                FILTER_FLAG_IPV4 | FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
                 throw new ssrf_blocked('blocked_ip:' . $ip);
             }
+            // 169.254.0.0/16 is link-local; FILTER_FLAG_NO_RES_RANGE catches it,
+            // but be explicit about the AWS metadata IP for log clarity.
+            if ($ip === '169.254.169.254') {
+                throw new ssrf_blocked('blocked_ip:' . $ip);
+            }
+            return;
         }
+
+        // IPv6 path
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+            $packed = inet_pton($ip);
+            if ($packed === false || strlen($packed) !== 16) {
+                throw new ssrf_blocked('blocked_ipv6:' . $ip);
+            }
+            // Loopback ::1
+            if ($packed === inet_pton('::1')) {
+                throw new ssrf_blocked('blocked_ipv6:' . $ip);
+            }
+            // Unspecified ::
+            if ($packed === inet_pton('::')) {
+                throw new ssrf_blocked('blocked_ipv6:' . $ip);
+            }
+            // ULA fc00::/7 — first byte top-7-bits = 1111110_
+            if ((ord($packed[0]) & 0xfe) === 0xfc) {
+                throw new ssrf_blocked('blocked_ipv6:' . $ip);
+            }
+            // Link-local fe80::/10 — first 10 bits = 1111111010
+            if (ord($packed[0]) === 0xfe && (ord($packed[1]) & 0xc0) === 0x80) {
+                throw new ssrf_blocked('blocked_ipv6:' . $ip);
+            }
+            // IPv4-mapped ::ffff:0:0/96 — first 80 bits = 0, next 16 = ffff
+            $mapped_prefix = "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff";
+            if (substr($packed, 0, 12) === $mapped_prefix) {
+                $unpacked = unpack('N', substr($packed, 12, 4));
+                if ($unpacked === false) {
+                    throw new ssrf_blocked('blocked_ipv6:' . $ip);
+                }
+                $v4 = long2ip($unpacked[1]);
+                $this->assert_ip_public($v4); // recursively re-validate as IPv4
+                return;
+            }
+            // NAT64 64:ff9b::/96 — common synthesis prefix; trust nothing here
+            $nat64_prefix = "\x00\x64\xff\x9b\x00\x00\x00\x00\x00\x00\x00\x00";
+            if (substr($packed, 0, 12) === $nat64_prefix) {
+                throw new ssrf_blocked('blocked_ipv6:' . $ip);
+            }
+            // AWS metadata over IPv6 (as documented for IMDSv2 dual-stack)
+            if ($packed === inet_pton('fd00:ec2::254')) {
+                throw new ssrf_blocked('blocked_ipv6:' . $ip);
+            }
+            return; // Public IPv6
+        }
+
+        // Neither IPv4 nor IPv6 — reject defensively.
+        throw new ssrf_blocked('blocked_ip:' . $ip);
     }
 }
