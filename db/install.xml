@@ -19,6 +19,7 @@
         <FIELD NAME="last_event_at"          TYPE="int"  LENGTH="10"  NOTNULL="false"/>
         <FIELD NAME="deleted_at"             TYPE="int"  LENGTH="10"  NOTNULL="false"/>
         <FIELD NAME="gdpr_delete_pending_at" TYPE="int"  LENGTH="10"  NOTNULL="false" COMMENT="Set when local delete done but FastPix delete failed"/>
+        <FIELD NAME="gdpr_delete_attempts"   TYPE="int"  LENGTH="10"  NOTNULL="true" DEFAULT="0" COMMENT="Number of remote-delete retry attempts; capped at 10 then row stops being retried"/>
         <FIELD NAME="timecreated"            TYPE="int"  LENGTH="10"  NOTNULL="true"/>
         <FIELD NAME="timemodified"           TYPE="int"  LENGTH="10"  NOTNULL="true"/>
       </FIELDS>
