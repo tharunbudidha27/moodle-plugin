@@ -28,7 +28,7 @@ class rate_limiter_service {
     public function allow(string $ip, int $limit_per_minute = 60): bool {
         try {
             $cache       = \cache::make('local_fastpix', self::CACHE_AREA);
-            $key         = 'rl_' . hash('crc32b', $ip);
+            $key         = 'rl_' . substr(hash('sha256', $ip), 0, 32);
             $capacity    = (float)$limit_per_minute;
             $refill_rate = $capacity / 60.0;
             $now         = time();

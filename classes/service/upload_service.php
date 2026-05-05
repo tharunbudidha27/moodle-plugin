@@ -161,7 +161,7 @@ class upload_service {
         $size     = (int)($metadata['size'] ?? 0);
         $logical  = "upload:{$userid}:" . hash('sha256', $filename . '|' . $size);
         // 'upload_dedup' MUC area uses simplekeys=true; hash to alphanumeric.
-        return 'ud_' . hash('crc32b', $logical);
+        return 'ud_' . substr(hash('sha256', $logical), 0, 32);
     }
 
     private function owner_hash(int $userid): string {

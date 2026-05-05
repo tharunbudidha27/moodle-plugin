@@ -60,10 +60,10 @@ class asset_cleanup extends \core\task\scheduled_task {
     private function invalidate_cache(string $fastpix_id, ?string $playback_id): void {
         $cache = \cache::make('local_fastpix', 'asset');
         if ($fastpix_id !== '') {
-            $cache->delete('fp_' . hash('crc32b', $fastpix_id));
+            $cache->delete('fp_' . substr(hash('sha256', $fastpix_id), 0, 32));
         }
         if (!empty($playback_id)) {
-            $cache->delete('pb_' . hash('crc32b', $playback_id));
+            $cache->delete('pb_' . substr(hash('sha256', $playback_id), 0, 32));
         }
     }
 }

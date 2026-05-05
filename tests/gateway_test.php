@@ -197,10 +197,11 @@ class gateway_test extends \advanced_testcase {
             }
         }
 
-        // Inspect breaker state: should be open. Cache key is the crc32b hash of
-        // method:path (MUC area uses simplekeys=true).
+        // Inspect breaker state: should be open. Cache key is the SHA-256-32
+        // hash of method:path (MUC area uses simplekeys=true). Per T1.1
+        // (REVIEW S-1) — was crc32b, now sha256/32 to avoid 32-bit collisions.
         $breaker = \cache::make('local_fastpix', 'circuit_breaker');
-        $state = $breaker->get(hash('crc32b', 'POST:/v1/on-demand/upload'));
+        $state = $breaker->get(substr(hash('sha256', 'POST:/v1/on-demand/upload'), 0, 32));
         $this->assertIsArray($state);
         $this->assertGreaterThanOrEqual(5, $state['failures']);
         $this->assertGreaterThan(time(), $state['open_until']);
@@ -208,9 +209,10 @@ class gateway_test extends \advanced_testcase {
 
     public function test_circuit_breaker_open_short_circuits_with_gateway_unavailable(): void {
         // Pre-load breaker as open. Cache key matches the gateway's hashing scheme
-        // (simplekeys=true on MUC area 'circuit_breaker').
+        // (simplekeys=true on MUC area 'circuit_breaker'). Per T1.1 — sha256/32
+        // replaced crc32b after REVIEW S-1.
         $breaker = \cache::make('local_fastpix', 'circuit_breaker');
-        $key = hash('crc32b', 'GET:/v1/on-demand/' . rawurlencode('any'));
+        $key = substr(hash('sha256', 'GET:/v1/on-demand/' . rawurlencode('any')), 0, 32);
         $breaker->set($key, [
             'failures' => 5,
             'open_until' => time() + 30,

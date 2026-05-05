@@ -16,7 +16,7 @@ class rate_limiter_service_test extends \advanced_testcase {
     }
 
     private function bucket_key(string $ip): string {
-        return 'rl_' . hash('crc32b', $ip);
+        return 'rl_' . substr(hash('sha256', $ip), 0, 32);
     }
 
     public function test_allow_first_call_for_new_ip_returns_true(): void {
@@ -86,8 +86,8 @@ class rate_limiter_service_test extends \advanced_testcase {
         rate_limiter_service::instance()->allow('11.11.11.11');
 
         $key = $this->bucket_key('11.11.11.11');
-        // Validate shape: 'rl_' + 8 lowercase hex chars from crc32b.
-        $this->assertMatchesRegularExpression('/^rl_[0-9a-f]{8}$/', $key);
+        // Validate shape: 'rl_' + 32 lowercase hex chars from sha256 prefix (per T1.1).
+        $this->assertMatchesRegularExpression('/^rl_[0-9a-f]{32}$/', $key);
 
         $bucket = \cache::make('local_fastpix', 'rate_limit')->get($key);
         $this->assertNotFalse($bucket);

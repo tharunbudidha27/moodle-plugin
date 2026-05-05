@@ -222,10 +222,10 @@ class projector {
     }
 
     private function cache_key_fastpix(string $fastpix_id): string {
-        return 'fp_' . hash('crc32b', $fastpix_id);
+        return 'fp_' . substr(hash('sha256', $fastpix_id), 0, 32);
     }
 
     private function cache_key_playback(string $playback_id): string {
-        return 'pb_' . hash('crc32b', $playback_id);
+        return 'pb_' . substr(hash('sha256', $playback_id), 0, 32);
     }
 }

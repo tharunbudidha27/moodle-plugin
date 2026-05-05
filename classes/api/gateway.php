@@ -312,9 +312,9 @@ class gateway {
 
     private function endpoint_key(string $method, string $path): string {
         // MUC area 'circuit_breaker' is declared simplekeys=true, so the key must be
-        // alphanumeric + underscore only. crc32b yields an 8-char lowercase hex string,
-        // deterministic and collision-resistant enough for our small endpoint set.
-        return hash('crc32b', $method . ':' . $path);
+        // alphanumeric only. SHA-256 prefix (32 hex chars) gives 128 bits of collision
+        // resistance — replacing CRC32 (32-bit) per REVIEW-2026-05-04 §S-1.
+        return substr(hash('sha256', $method . ':' . $path), 0, 32);
     }
 
     private function base_url(): string {
