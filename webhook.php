@@ -44,7 +44,13 @@ if (!($event instanceof \stdClass) || empty($event->id) || empty($event->type)) 
     die();
 }
 
-// 6. Idempotent ledger insert. UNIQUE(provider_event_id) is the contract.
+// 6 + 7. Atomic ledger insert + adhoc task enqueue.
+// Per REVIEW-2026-05-04 §S-3 / T1.6 — previously the insert and the
+// queue_adhoc_task call were independent. If the task enqueue failed
+// (DB drop, OOM, lock timeout) the ledger row was committed with
+// status=pending but no task to project it; FastPix saw 200 and stopped
+// retrying. Now both happen in a single transaction so a queue failure
+// rolls the row back and FastPix's retry path kicks in.
 global $DB;
 $row = (object)[
     'provider_event_id'     => (string)$event->id,
@@ -56,18 +62,34 @@ $row = (object)[
     'status'                => 'pending',
     'processing_latency_ms' => null,
 ];
+
+$transaction = $DB->start_delegated_transaction();
 try {
     $row->id = $DB->insert_record('local_fastpix_webhook_event', $row);
+
+    $task = new \local_fastpix\task\process_webhook();
+    $task->set_custom_data(['provider_event_id' => (string)$event->id]);
+    \core\task\manager::queue_adhoc_task($task);
+
+    $transaction->allow_commit();
 } catch (\dml_write_exception $e) {
-    // Duplicate event_id — FastPix retried; we already have it. 200 so they stop.
+    // UNIQUE(provider_event_id) violated — FastPix retried before we
+    // ack'd, the row already exists from the earlier request. Roll back
+    // this attempt (Moodle's rollback re-throws the original, which we
+    // swallow) and 200 so FastPix stops retrying.
+    try {
+        $transaction->rollback($e);
+    } catch (\dml_write_exception $rethrown) {
+        // Expected: Moodle's rollback re-throws.
+    }
     http_response_code(200);
     die();
+} catch (\Throwable $e) {
+    // Any other failure (queue_adhoc_task threw, DB went away mid-insert,
+    // etc.) — rollback re-throws and Moodle's error handler returns 5xx.
+    // FastPix will retry; idempotent insert wins next time.
+    $transaction->rollback($e);
 }
-
-// 7. Enqueue the adhoc task; projection happens out-of-band.
-$task = new \local_fastpix\task\process_webhook();
-$task->set_custom_data(['provider_event_id' => (string)$event->id]);
-\core\task\manager::queue_adhoc_task($task);
 
 // 8. Done — return fast so FastPix doesn't retry.
 http_response_code(200);
