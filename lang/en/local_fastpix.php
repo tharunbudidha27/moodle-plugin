@@ -16,11 +16,24 @@ $string['ssrf_blocked'] = 'URL rejected by SSRF guard: {$a}';
 $string['rate_limit_exceeded'] = 'Rate limit exceeded: {$a}';
 $string['credentials_missing'] = 'FastPix credentials are not configured: {$a}';
 
+// Capability labels.
+$string['fastpix:configurecredentials'] = 'Configure FastPix API credentials';
+$string['fastpix:uploadmedia'] = 'Upload media to FastPix';
+
 // Scheduled task names.
 $string['task_orphan_sweeper'] = 'Sweep expired upload sessions';
 $string['task_webhook_event_pruner'] = 'Prune old processed webhook events';
 $string['task_asset_cleanup'] = 'Hard-delete soft-deleted assets past GDPR retention';
 $string['task_signing_key_rotator'] = 'Rotate JWT signing key every 90 days';
+$string['task_retry_gdpr_delete'] = 'Retry pending GDPR remote deletions';
+
+// Adhoc task name.
+$string['task_process_webhook'] = 'Process a single FastPix webhook event';
+
+// Web service descriptions.
+$string['ws_create_upload_session'] = 'Create a FastPix file upload session';
+$string['ws_create_url_pull_session'] = 'Create a FastPix URL pull session';
+$string['ws_get_upload_status'] = 'Get the status of a FastPix upload session';
 
 // Admin settings page.
 $string['settings_credentials']       = 'API Credentials';
