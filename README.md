@@ -51,6 +51,15 @@ Definition-of-Done items live in
   the file store on a single-FPM dev install). The circuit breaker and
   rate-limiter rely on shared cache state.
 
+### Vendored dependencies
+
+Per Moodle Plugins Directory rules, no runtime Composer dependencies. The
+plugin vendors a single library:
+
+- `firebase/php-jwt` **v6.10.0** at `classes/vendor/php-jwt/`
+  (six PHP files only, license MIT, SHA256 attestation in
+  `classes/vendor/php-jwt/VENDOR.md`).
+
 ## Installation
 
 1. Drop the plugin tree into your Moodle install at `local/fastpix/`. From
