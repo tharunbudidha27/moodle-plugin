@@ -5,8 +5,11 @@ defined('MOODLE_INTERNAL') || die();
 
 class verifier_test extends \advanced_testcase {
 
-    private const CURRENT  = 'current-secret-value';
-    private const PREVIOUS = 'previous-secret-value';
+    // Test fixtures must be ≥ verifier::MIN_SECRET_BYTES (32). Match the
+    // install.php format: 64 hex chars from a fixed test seed (deterministic
+    // for unit tests; install.php uses random_bytes() in production).
+    private const CURRENT  = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    private const PREVIOUS = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
     private const BODY     = '{"type":"media.ready","object":{"id":"abc"}}';
 
     public function setUp(): void {
@@ -64,7 +67,9 @@ class verifier_test extends \advanced_testcase {
     // --- Rotation window -------------------------------------------------
 
     public function test_verify_with_previous_secret_within_30min_window_returns_true(): void {
-        set_config('webhook_secret_current', 'new', 'local_fastpix');
+        set_config('webhook_secret_current',
+            'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+            'local_fastpix');
         set_config('webhook_secret_previous', self::PREVIOUS, 'local_fastpix');
         set_config('webhook_secret_rotated_at', time() - 1500, 'local_fastpix'); // 25 min ago
 
@@ -73,7 +78,9 @@ class verifier_test extends \advanced_testcase {
     }
 
     public function test_verify_with_previous_secret_after_30min_window_returns_false(): void {
-        set_config('webhook_secret_current', 'new', 'local_fastpix');
+        set_config('webhook_secret_current',
+            'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+            'local_fastpix');
         set_config('webhook_secret_previous', self::PREVIOUS, 'local_fastpix');
         set_config('webhook_secret_rotated_at', time() - 1801, 'local_fastpix'); // just past window
 

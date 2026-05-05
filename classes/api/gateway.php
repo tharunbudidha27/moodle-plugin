@@ -207,6 +207,7 @@ class gateway {
         $start = microtime(true);
         $attempt = 0;
         $last_error = null;
+        $last_body  = '';
         $delay_ms = 0;
 
         while ($attempt < self::RETRY_MAX_ATTEMPTS) {
@@ -231,9 +232,14 @@ class gateway {
                     return $this->decode_body($response);
                 }
 
+                // Capture the body once per response so retries_exhausted carries
+                // the LAST upstream diagnostic. Body is NOT logged anywhere — only
+                // attached to the thrown exception's $a context for the caller.
+                $last_body = $this->body_snippet($response);
+
                 if ($status === 404) {
                     if ($method === 'GET' && str_starts_with($path, '/v1/on-demand/')) {
-                        throw new gateway_not_found($path);
+                        throw new gateway_not_found("{$path} body={$last_body}");
                     }
                     if ($method === 'DELETE') {
                         $this->breaker_record_success($endpoint_key);
@@ -243,7 +249,7 @@ class gateway {
 
                 if (!$this->is_retryable($status)) {
                     $this->breaker_record_failure($endpoint_key);
-                    throw new gateway_unavailable("status_{$status}:{$endpoint_key}");
+                    throw new gateway_unavailable("status_{$status}:{$endpoint_key} body={$last_body}");
                 }
 
                 $delay_ms = $status === 429
@@ -267,7 +273,23 @@ class gateway {
         }
 
         $this->breaker_record_failure($endpoint_key);
-        throw new gateway_unavailable("retries_exhausted:{$last_error}:{$endpoint_key}");
+        $body_tag = $last_body !== '' ? " body={$last_body}" : '';
+        throw new gateway_unavailable("retries_exhausted:{$last_error}:{$endpoint_key}{$body_tag}");
+    }
+
+    /**
+     * Return up to 500 chars of an HTTP response body, with an ellipsis when
+     * truncated. Used to attach upstream diagnostics to gateway_unavailable /
+     * gateway_not_found exceptions. The body is NEVER passed to error_log —
+     * only carried on the exception so callers can surface it in their own
+     * logging or admin UI. Cost ~30 min debugging on 2026-05-04 (REVIEW T2.2).
+     */
+    private function body_snippet($response): string {
+        $raw = (string)$response->getBody();
+        if (strlen($raw) <= 500) {
+            return $raw;
+        }
+        return substr($raw, 0, 500) . '...';
     }
 
     private function is_retryable(int $status): bool {
