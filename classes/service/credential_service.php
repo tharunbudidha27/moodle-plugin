@@ -53,24 +53,51 @@ class credential_service {
      * NEVER logs the private key.
      */
     public function ensure_signing_key(): void {
+        // Fast path: already minted, no lock needed.
         $kid = (string)get_config('local_fastpix', 'signing_key_id');
         $pem = (string)get_config('local_fastpix', 'signing_private_key');
         if ($kid !== '' && $pem !== '') {
             return;
         }
 
-        $response = ($this->gateway ?? \local_fastpix\api\gateway::instance())->create_signing_key();
+        // Concurrency: under PHP-FPM, two workers can both pass the check
+        // above and both call create_signing_key — leaking one key on the
+        // FastPix side. Use \core\lock to serialize first-time bootstrap.
+        // Per REVIEW-2026-05-04 §4 (concurrency).
+        $factory = \core\lock\lock_config::get_lock_factory('local_fastpix_signing_key');
+        $lock = $factory->get_lock('ensure', 30);
+        if (!$lock) {
+            throw new \local_fastpix\exception\lock_acquisition_failed(
+                'ensure_signing_key'
+            );
+        }
 
-        $new_kid = (string)($response->id ?? '');
-        $new_pem = (string)($response->privateKey ?? '');
+        try {
+            // Double-check inside the lock: another worker may have just
+            // bootstrapped while we were waiting. If so, nothing to do.
+            $kid = (string)get_config('local_fastpix', 'signing_key_id');
+            $pem = (string)get_config('local_fastpix', 'signing_private_key');
+            if ($kid !== '' && $pem !== '') {
+                return;
+            }
 
-        set_config('signing_key_id', $new_kid, 'local_fastpix');
-        set_config('signing_private_key', base64_encode($new_pem), 'local_fastpix');
+            $response = ($this->gateway ?? \local_fastpix\api\gateway::instance())->create_signing_key();
 
-        // Log only the kid; the private key never appears in any log line (S2).
-        error_log(json_encode([
-            'event' => 'credential.signing_key_bootstrapped',
-            'id'    => $new_kid,
-        ]));
+            $new_kid = (string)($response->id ?? '');
+            $new_pem = (string)($response->privateKey ?? '');
+
+            set_config('signing_key_id', $new_kid, 'local_fastpix');
+            set_config('signing_private_key', base64_encode($new_pem), 'local_fastpix');
+
+            // Log only the kid; the private key never appears in any log line (S2).
+            error_log(json_encode([
+                'event' => 'credential.signing_key_bootstrapped',
+                'id'    => $new_kid,
+            ]));
+        } finally {
+            // Release MUST run even if create_signing_key threw, so the
+            // next worker can retry instead of waiting 30s for stale lock.
+            $lock->release();
+        }
     }
 }
