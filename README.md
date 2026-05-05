@@ -187,6 +187,47 @@ emits a `webhook.secret_too_short` log line on rejection — operators
 see signature verification fail loudly rather than degrade to a weaker
 check.
 
+### Health endpoint
+
+The plugin ships a small public health endpoint at:
+
+```
+https://your.moodle.example/local/fastpix/health.php
+```
+
+No authentication required. Per-IP rate-limited at 30 req/min so the
+endpoint can't be used as a probing oracle. Returns JSON:
+
+```
+{
+  "status": "ok" | "degraded" | "rate_limited" | "error",
+  "fastpix_reachable": true | false | null,
+  "latency_ms": <int>,
+  "timestamp": <unix-seconds>
+}
+```
+
+HTTP status codes:
+
+| Code | Meaning                                                    |
+|------|------------------------------------------------------------|
+| 200  | FastPix probe succeeded                                    |
+| 503  | FastPix probe failed, or an unexpected upstream error     |
+| 429  | Per-IP rate limit hit; back off and retry                 |
+
+The endpoint never returns 500. Any exception in the probe path is
+caught and surfaced as a 503 with `status: "error"` so operators can
+distinguish a hard upstream failure from a slow probe.
+
+Suggested ops use:
+
+- Wire it into your monitoring system (e.g. as a Pingdom / UptimeRobot
+  / Prometheus blackbox check).
+- Alert on either non-2xx for >2 consecutive checks, OR
+  `fastpix_reachable=false` for >5 minutes.
+- The `latency_ms` field is the FastPix probe round-trip; useful as a
+  proxy signal for FastPix-side degradation.
+
 ## Architecture
 
 The 3-layer rule, the seven non-negotiables, the FastPix wire contract,
