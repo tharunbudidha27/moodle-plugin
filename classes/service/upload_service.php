@@ -224,10 +224,35 @@ class upload_service {
         ];
     }
 
+    /**
+     * SSRF guard for user-supplied source URLs.
+     *
+     * Threat model: we filter URLs that resolve to private/loopback/link-local
+     * IPs from Moodle's resolver at submission time. This is defense in depth.
+     *
+     * What this guard does NOT cover: FastPix-side DNS rebinding. Moodle
+     * never directly fetches source_url — the gateway POSTs the URL inside
+     * a JSON body to api.fastpix.io, and FastPix's backend fetches it later
+     * with FastPix's own resolver. CURLOPT_RESOLVE pinning on our cURL
+     * handle has zero effect on FastPix's later fetch. That residual risk
+     * is FastPix's to mitigate on their infrastructure; we filter obvious
+     * abuse here so stale or compromised resolvers on the Moodle side
+     * can't be used to probe FastPix's internal network.
+     *
+     * Empirical audit 2026-05-06 (REVIEW DoD §31): zero direct-fetch sites
+     * for source_url in the plugin source.
+     */
     private function assert_ssrf_safe(string $url): void {
         $parts = parse_url($url);
         if (($parts['scheme'] ?? '') !== 'https') {
             throw new ssrf_blocked('non_https');
+        }
+        // Reject embedded credentials (https://user:pass@host/...) — common
+        // exfiltration vector via Referer headers and access logs, and
+        // Moodle has no use case for credential-in-URL fetches against
+        // FastPix.
+        if (!empty($parts['user']) || !empty($parts['pass'])) {
+            throw new ssrf_blocked('credentials_in_url');
         }
         $host = strtolower($parts['host'] ?? '');
         // Strip IPv6 literal brackets if parse_url left them in (varies by
@@ -251,11 +276,9 @@ class upload_service {
         }
 
         // Hostname: resolve A + AAAA records. dns_get_record returns false on
-        // failure; treat empty/false the same as gethostbynamel did.
-        // TODO(TOCTOU REVIEW-2026-05-04 §S-2): the resolved IP set is checked
-        // here but FastPix's gateway re-resolves at fetch time, opening a DNS
-        // rebinding window. Proper fix needs CURLOPT_RESOLVE-style pinning;
-        // tracked as a Tier 3 item.
+        // failure; treat empty/false the same as gethostbynamel did. The
+        // residual TOCTOU on FastPix's later fetch is documented at the top
+        // of this method and is not a Moodle-side concern.
         $records = @dns_get_record($host, DNS_A | DNS_AAAA);
         if ($records === false || empty($records)) {
             throw new ssrf_blocked('unresolvable:' . $host);

@@ -110,10 +110,22 @@ The DoD walk identified 8 work units to reach GA. Highest priority:
 2. **Resolve cleanup-task drift** (DoD §24, §25). Architecture says
    7-day soft-purge as a separate task; current code has 90-day GDPR
    retention only. ADR or doc update.
-3. **DNS-rebinding TOCTOU mitigation** (DoD §31). `CURLOPT_RESOLVE`
-   pinning through `\core\http_client`. Deferred from T1.3.
-4. **Health endpoint** at `/local/fastpix/health.php` (DoD §35) —
+3. **Health endpoint** at `/local/fastpix/health.php` (DoD §35) —
    wraps `gateway::health_probe()`, returns JSON, 503 on probe failure.
+
+Architecture-clarified, not a code fix:
+
+- **DNS-rebinding TOCTOU on source_url** (formerly Hard Blocker, DoD §31
+  — now PASS). Empirical audit 2026-05-06 showed Moodle never directly
+  fetches `source_url`. The gateway POSTs the URL inside a JSON body to
+  `api.fastpix.io`; FastPix's backend fetches the URL with FastPix's
+  own resolver. CURLOPT_RESOLVE pinning on Moodle's cURL handle has
+  zero effect on FastPix's later fetch. The original SSRF window was
+  misframed. The existing SSRF guard remains in place as defense in
+  depth (filters obvious abuse before forwarding to FastPix); see the
+  comment block at the top of `assert_ssrf_safe()` in
+  `classes/service/upload_service.php` for the full threat-model
+  documentation.
 
 Medium priority:
 

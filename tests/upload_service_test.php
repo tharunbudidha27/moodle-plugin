@@ -255,6 +255,21 @@ class upload_service_test extends \advanced_testcase {
         }
     }
 
+    public function test_create_url_pull_session_rejects_credentials_in_url(): void {
+        $mock = $this->createMock(\local_fastpix\api\gateway::class);
+        $mock->expects($this->never())->method('media_create_from_url');
+        $this->inject_gateway_mock($mock);
+
+        try {
+            upload_service::instance()->create_url_pull_session(
+                42, 'https://user:pass@example.com/v.mp4'
+            );
+            $this->fail('expected ssrf_blocked');
+        } catch (\local_fastpix\exception\ssrf_blocked $e) {
+            $this->assertStringContainsString('credentials_in_url', (string)$e->a);
+        }
+    }
+
     public function test_create_url_pull_session_rejects_localhost(): void {
         $mock = $this->createMock(\local_fastpix\api\gateway::class);
         $mock->expects($this->never())->method('media_create_from_url');
