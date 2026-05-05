@@ -118,6 +118,38 @@ class upload_service {
 
     // ---- Helpers ---------------------------------------------------------
 
+    /**
+     * Read-only lookup of an upload session, scoped to the calling user.
+     *
+     * Per @security-compliance: ownership check (userid) is enforced in the
+     * SQL clause to prevent horizontal privilege escalation. Callers with
+     * the :uploadmedia capability can read THEIR sessions only, not others'.
+     *
+     * @param int $session_id Local upload_session row id
+     * @param int $userid     The user who must own the session
+     * @return \stdClass
+     * @throws \local_fastpix\exception\asset_not_found
+     */
+    public function get_status(int $session_id, int $userid): \stdClass {
+        global $DB;
+        $row = $DB->get_record(self::TABLE, [
+            'id'     => $session_id,
+            'userid' => $userid,
+        ]);
+        if (!$row) {
+            throw new \local_fastpix\exception\asset_not_found(
+                "upload_session id={$session_id} for userid={$userid}"
+            );
+        }
+        return (object)[
+            'session_id' => (int)$row->id,
+            'upload_id'  => (string)$row->upload_id,
+            'state'      => (string)$row->state,
+            'fastpix_id' => $row->fastpix_id !== null ? (string)$row->fastpix_id : '',
+            'expires_at' => (int)$row->expires_at,
+        ];
+    }
+
     private function assert_drm_gate(bool $drm_required): void {
         if ($drm_required && !feature_flag_service::instance()->drm_enabled()) {
             throw new drm_not_configured('drm_required_but_not_configured');
