@@ -167,8 +167,21 @@ class upload_service {
     private function owner_hash(int $userid): string {
         $salt = (string)get_config('local_fastpix', 'user_hash_salt');
         if ($salt === '') {
-            $salt = random_string(32);
-            set_config('user_hash_salt', $salt, 'local_fastpix');
+            // The previous fallback was: generate a random salt + set_config.
+            // Removed per REVIEW-2026-05-04 §4 — concurrent first-uses produced
+            // different salts, second worker's set_config overwrote first's,
+            // and the first worker's emitted hash silently became orphaned.
+            //
+            // db/install.php bootstraps user_hash_salt at install time
+            // (random_string(32)), so an empty salt at runtime indicates:
+            //   - the install hook didn't run (broken install), or
+            //   - someone deliberately nulled the config (operator error).
+            // Both warrant failing loud so the operator notices.
+            throw new \coding_exception(
+                'local_fastpix: user_hash_salt config is empty; ' .
+                'expected to be bootstrapped by db/install.php. ' .
+                'Re-run plugin install or restore the config.'
+            );
         }
         return hash_hmac('sha256', (string)$userid, $salt);
     }

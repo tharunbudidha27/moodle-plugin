@@ -83,20 +83,23 @@ class upload_service_test extends \advanced_testcase {
         $this->assertStringNotContainsString('42', $captured['metadata']['moodle_owner_userhash']);
     }
 
-    public function test_create_file_upload_session_auto_generates_user_hash_salt_on_first_call(): void {
+    public function test_create_file_upload_session_throws_coding_exception_when_user_hash_salt_empty(): void {
+        // Per T1.5 (REVIEW §4): the in-request salt-bootstrap fallback was
+        // a race anti-pattern (concurrent first-uses produced different salts).
+        // db/install.php now bootstraps the salt at install time; an empty
+        // salt at runtime is genuinely abnormal and must surface, not
+        // silently regenerate. Replaces the legacy auto-gen test.
         set_config('user_hash_salt', '', 'local_fastpix');
-
         $mock = $this->createMock(\local_fastpix\api\gateway::class);
-        $mock->method('input_video_direct_upload')->willReturn($this->default_file_upload_response());
+        // Gateway must not be called — owner_hash throws before we get there.
+        $mock->expects($this->never())->method('input_video_direct_upload');
         $this->inject_gateway_mock($mock);
 
+        $this->expectException(\coding_exception::class);
+        $this->expectExceptionMessageMatches('/user_hash_salt config is empty/');
         upload_service::instance()->create_file_upload_session(
             7, ['filename' => 'c.mp4', 'size' => 50]
         );
-
-        $salt = (string)get_config('local_fastpix', 'user_hash_salt');
-        $this->assertNotSame('', $salt);
-        $this->assertGreaterThanOrEqual(32, strlen($salt));
     }
 
     // ============ B. Deduplication ======================================
