@@ -339,4 +339,170 @@ class projector_test extends \advanced_testcase {
         $this->assertFalse($cache->get($fp_key));
         $this->assertFalse($cache->get($pb_key));
     }
+
+    // ---- W2: asset key is event.object.id, NOT event.data.id -------------
+
+    public function test_wrong_field_yields_wrong_asset(): void {
+        global $DB;
+        $correct  = $this->insert_asset(['fastpix_id' => 'media-correct', 'status' => 'created']);
+        $decoy    = $this->insert_asset(['fastpix_id' => 'media-decoy',   'status' => 'created']);
+
+        $event = (object)[
+            'id'         => 'evt-w2-fixture',
+            'type'       => 'video.media.ready',
+            'occurredAt' => time() + 1000,
+            'object'     => (object)['type' => 'video.media', 'id' => 'media-correct'],
+            'data'       => (object)[
+                'id'          => 'media-decoy', // wrong field; must NOT win
+                'playbackIds' => [(object)['id' => 'pb-w2', 'accessPolicy' => 'public']],
+            ],
+        ];
+        (new projector())->project($event);
+
+        $correct_after = $DB->get_record(self::TABLE, ['fastpix_id' => 'media-correct']);
+        $decoy_after   = $DB->get_record(self::TABLE, ['fastpix_id' => 'media-decoy']);
+
+        $this->assertSame('ready', $correct_after->status);
+        $this->assertSame('pb-w2', $correct_after->playback_id);
+        $this->assertSame('created', $decoy_after->status);
+        $this->assertNull($decoy_after->playback_id);
+    }
+
+    // ---- Real-payload regressions: apply_first_playback_id accepts public --
+
+    public function test_real_video_media_created_with_public_playback_id_lands(): void {
+        global $DB;
+        $payload = json_decode(<<<'JSON'
+{"type":"video.media.created","object":{"type":"media","id":"6061902b-public-1"},"id":"evt-pub-1","occurredAt":1778240000,"data":{"id":"6061902b-public-1","playbackIds":[{"id":"2da377aa-public-1","accessPolicy":"public"}],"status":"Created"}}
+JSON);
+        (new projector())->project($payload);
+
+        $row = $DB->get_record(self::TABLE, ['fastpix_id' => '6061902b-public-1']);
+        $this->assertNotFalse($row);
+        $this->assertSame('2da377aa-public-1', $row->playback_id);
+        $this->assertSame('public', $row->access_policy);
+        $this->assertSame(0, (int)$row->drm_required);
+    }
+
+    public function test_real_video_media_ready_public_policy_applies_playback_and_status(): void {
+        global $DB;
+        $this->insert_asset(['fastpix_id' => 'media-r-pub', 'playback_id' => null, 'access_policy' => 'private']);
+        $payload = json_decode(<<<'JSON'
+{"type":"video.media.ready","object":{"type":"media","id":"media-r-pub"},"id":"evt-r-pub","occurredAt":1778240100,"data":{"id":"media-r-pub","playbackIds":[{"id":"pb-r-pub","accessPolicy":"public"}],"duration":"00:00:10"}}
+JSON);
+        (new projector())->project($payload);
+
+        $row = $DB->get_record(self::TABLE, ['fastpix_id' => 'media-r-pub']);
+        $this->assertSame('ready', $row->status);
+        $this->assertSame('pb-r-pub', $row->playback_id);
+        $this->assertSame('public', $row->access_policy);
+        $this->assertEqualsWithDelta(10.0, (float)$row->duration, 0.001);
+    }
+
+    // ---- parse_duration HH:MM:SS branch -----------------------------------
+
+    public function test_parse_duration_handles_hhmmss_with_fractional_seconds(): void {
+        global $DB;
+        $this->insert_asset(['fastpix_id' => 'media-dur-frac', 'status' => 'created']);
+        $event = $this->build_event('video.media.ready', 'media-dur-frac', [
+            'data' => (object)['duration' => '00:00:12.345'],
+        ]);
+        (new projector())->project($event);
+        $row = $DB->get_record(self::TABLE, ['fastpix_id' => 'media-dur-frac']);
+        $this->assertEqualsWithDelta(12.345, (float)$row->duration, 0.001);
+    }
+
+    public function test_parse_duration_leaves_existing_value_when_unparseable(): void {
+        global $DB;
+        $this->insert_asset([
+            'fastpix_id' => 'media-dur-bad',
+            'status'     => 'created',
+            'duration'   => 42.0,
+        ]);
+        $event = $this->build_event('video.media.ready', 'media-dur-bad', [
+            'data' => (object)['duration' => 'not-a-time'],
+        ]);
+        (new projector())->project($event);
+        $row = $DB->get_record(self::TABLE, ['fastpix_id' => 'media-dur-bad']);
+        $this->assertEqualsWithDelta(42.0, (float)$row->duration, 0.001);
+    }
+
+    // ---- Caption tracks --------------------------------------------------
+
+    public function test_caption_tracks_set_has_captions_flag(): void {
+        global $DB;
+        $this->insert_asset(['fastpix_id' => 'media-cap', 'status' => 'created', 'has_captions' => 0]);
+        $event = $this->build_event('video.media.ready', 'media-cap', [
+            'data' => (object)[
+                'tracks' => [
+                    (object)['type' => 'subtitle'],
+                    (object)['type' => 'video'],
+                    (object)['type' => 'caption'],
+                ],
+            ],
+        ]);
+        (new projector())->project($event);
+        $row = $DB->get_record(self::TABLE, ['fastpix_id' => 'media-cap']);
+        $this->assertSame(1, (int)$row->has_captions);
+    }
+
+    // ---- Newer event types ------------------------------------------------
+
+    public function test_video_upload_media_created_applies_playback_id_and_sets_created_status(): void {
+        global $DB;
+        $this->insert_asset(['fastpix_id' => 'media-upmc', 'status' => 'waiting']);
+        $event = $this->build_event('video.upload.media_created', 'media-upmc', [
+            'data' => (object)[
+                'playbackIds' => [(object)['id' => 'pb-upmc', 'accessPolicy' => 'public']],
+            ],
+        ]);
+        (new projector())->project($event);
+        $row = $DB->get_record(self::TABLE, ['fastpix_id' => 'media-upmc']);
+        $this->assertSame('pb-upmc', $row->playback_id);
+        $this->assertSame('created', $row->status);
+        $this->assertSame('public', $row->access_policy);
+    }
+
+    public function test_video_media_upload_sets_status_from_data(): void {
+        global $DB;
+        $this->insert_asset(['fastpix_id' => 'media-upload', 'status' => '']);
+        $event = $this->build_event('video.media.upload', 'media-upload', [
+            'data' => (object)['status' => 'waiting'],
+        ]);
+        (new projector())->project($event);
+        $row = $DB->get_record(self::TABLE, ['fastpix_id' => 'media-upload']);
+        $this->assertSame('waiting', $row->status);
+    }
+
+    public function test_video_media_updated_applies_status_and_duration(): void {
+        global $DB;
+        $this->insert_asset(['fastpix_id' => 'media-upd', 'status' => 'created']);
+        $event = $this->build_event('video.media.updated', 'media-upd', [
+            'data' => (object)['status' => 'ready', 'duration' => '00:01:30'],
+        ]);
+        (new projector())->project($event);
+        $row = $DB->get_record(self::TABLE, ['fastpix_id' => 'media-upd']);
+        $this->assertSame('ready', $row->status);
+        $this->assertEqualsWithDelta(90.0, (float)$row->duration, 0.001);
+    }
+
+    // ---- Redaction canary (S2) -------------------------------------------
+
+    public function test_no_secret_in_log_on_unknown_event_type(): void {
+        $this->insert_asset(['fastpix_id' => 'media-unknown-type']);
+        $event = $this->build_event('video.media.bogus_type', 'media-unknown-type');
+
+        $tmp = tempnam(sys_get_temp_dir(), 'projlog_');
+        $original = ini_get('error_log');
+        ini_set('error_log', $tmp);
+        try {
+            (new projector())->project($event);
+            $log = (string)file_get_contents($tmp);
+        } finally {
+            ini_set('error_log', $original);
+            @unlink($tmp);
+        }
+        $this->assertDoesNotMatchRegularExpression('/eyJ[A-Za-z0-9_-]{10,}/', $log);
+        $this->assertDebuggingCalled();
+    }
 }

@@ -481,4 +481,105 @@ class upload_service_test extends \advanced_testcase {
         $this->assertSame('https://1.2.3.4/source.mp4', $stored->source_url);
         $this->assertSame('', (string)$stored->upload_url);
     }
+
+    // ============ M5: URL-pull dedup window ===============================
+
+    public function test_create_url_pull_session_within_60s_returns_deduped_true(): void {
+        $mock = $this->createMock(\local_fastpix\api\gateway::class);
+        $mock->expects($this->once())
+            ->method('media_create_from_url')
+            ->willReturn($this->default_url_pull_response('m-urlpull-dedup'));
+        $this->inject_gateway_mock($mock);
+
+        $first = upload_service::instance()->create_url_pull_session(
+            42, 'https://1.2.3.4/sample.mp4'
+        );
+        $second = upload_service::instance()->create_url_pull_session(
+            42, 'https://1.2.3.4/sample.mp4'
+        );
+
+        $this->assertFalse($first->deduped);
+        $this->assertTrue($second->deduped);
+        $this->assertSame($first->session_id, $second->session_id);
+    }
+
+    public function test_create_url_pull_session_after_60s_creates_new_session(): void {
+        $mock = $this->createMock(\local_fastpix\api\gateway::class);
+        $mock->expects($this->exactly(2))
+            ->method('media_create_from_url')
+            ->willReturnOnConsecutiveCalls(
+                $this->default_url_pull_response('m-urlpull-1'),
+                $this->default_url_pull_response('m-urlpull-2'),
+            );
+        $this->inject_gateway_mock($mock);
+
+        $first = upload_service::instance()->create_url_pull_session(
+            42, 'https://1.2.3.4/sample.mp4'
+        );
+
+        \cache::make('local_fastpix', 'upload_dedup')->purge();
+
+        $second = upload_service::instance()->create_url_pull_session(
+            42, 'https://1.2.3.4/sample.mp4'
+        );
+
+        $this->assertFalse($second->deduped);
+        $this->assertNotSame($first->session_id, $second->session_id);
+    }
+
+    public function test_get_status_returns_dto_for_owners_session(): void {
+        $mock = $this->createMock(\local_fastpix\api\gateway::class);
+        $mock->method('input_video_direct_upload')
+            ->willReturn($this->default_file_upload_response('u-status'));
+        $this->inject_gateway_mock($mock);
+
+        $resp = upload_service::instance()->create_file_upload_session(
+            42, ['filename' => 'status.mp4', 'size' => 100]
+        );
+        $status = upload_service::instance()->get_status($resp->session_id, 42);
+        $this->assertSame($resp->session_id, $status->session_id);
+        $this->assertSame('u-status', $status->upload_id);
+        $this->assertSame('pending', $status->state);
+    }
+
+    public function test_get_status_throws_asset_not_found_for_other_users_session(): void {
+        $mock = $this->createMock(\local_fastpix\api\gateway::class);
+        $mock->method('input_video_direct_upload')
+            ->willReturn($this->default_file_upload_response('u-private'));
+        $this->inject_gateway_mock($mock);
+
+        $resp = upload_service::instance()->create_file_upload_session(
+            1, ['filename' => 'a.mp4', 'size' => 100]
+        );
+
+        $this->expectException(\local_fastpix\exception\asset_not_found::class);
+        upload_service::instance()->get_status($resp->session_id, 9999);
+    }
+
+    public function test_get_status_throws_asset_not_found_for_unknown_session_id(): void {
+        $this->expectException(\local_fastpix\exception\asset_not_found::class);
+        upload_service::instance()->get_status(999999, 1);
+    }
+
+    public function test_create_url_pull_session_different_source_url_creates_new_session(): void {
+        $mock = $this->createMock(\local_fastpix\api\gateway::class);
+        $mock->expects($this->exactly(2))
+            ->method('media_create_from_url')
+            ->willReturnOnConsecutiveCalls(
+                $this->default_url_pull_response('m-urlA'),
+                $this->default_url_pull_response('m-urlB'),
+            );
+        $this->inject_gateway_mock($mock);
+
+        $a = upload_service::instance()->create_url_pull_session(
+            42, 'https://1.2.3.4/a.mp4'
+        );
+        $b = upload_service::instance()->create_url_pull_session(
+            42, 'https://1.2.3.4/b.mp4'
+        );
+
+        $this->assertFalse($a->deduped);
+        $this->assertFalse($b->deduped);
+        $this->assertNotSame($a->session_id, $b->session_id);
+    }
 }

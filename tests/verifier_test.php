@@ -155,4 +155,70 @@ class verifier_test extends \advanced_testcase {
         $second = verifier::instance();
         $this->assertNotSame($first, $second);
     }
+
+    // ---- Canonical FastPix shape (production format) ---------------------
+
+    public function test_verify_canonical_base64_secret_with_base64_output(): void {
+        $raw_secret = random_bytes(32);
+        $configured = base64_encode($raw_secret);
+        set_config('webhook_secret_current', $configured, 'local_fastpix');
+
+        $sig = base64_encode(hash_hmac('sha256', self::BODY, $raw_secret, true));
+        $this->assertTrue(verifier::instance()->verify(self::BODY, $sig));
+    }
+
+    // ---- S7: 29m59s boundary ---------------------------------------------
+
+    public function test_verify_with_previous_secret_at_29m59s_returns_true(): void {
+        set_config('webhook_secret_current',
+            'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+            'local_fastpix');
+        set_config('webhook_secret_previous', self::PREVIOUS, 'local_fastpix');
+        set_config('webhook_secret_rotated_at', time() - 1799, 'local_fastpix');
+
+        $sig = $this->sign(self::BODY, self::PREVIOUS);
+        $this->assertTrue(verifier::instance()->verify(self::BODY, $sig));
+    }
+
+    // ---- Short previous-secret during rotation window logs and rejects ---
+
+    public function test_verify_with_short_previous_secret_during_rotation_window_logs_and_rejects(): void {
+        set_config('webhook_secret_current', self::CURRENT, 'local_fastpix');
+        set_config('webhook_secret_previous', 'too-short', 'local_fastpix');
+        set_config('webhook_secret_rotated_at', time() - 600, 'local_fastpix');
+
+        $tmp = tempnam(sys_get_temp_dir(), 'verlog_');
+        $original = ini_get('error_log');
+        ini_set('error_log', $tmp);
+        try {
+            $this->assertFalse(verifier::instance()->verify(self::BODY, str_repeat('0', 64)));
+            $log = (string)file_get_contents($tmp);
+        } finally {
+            ini_set('error_log', $original);
+            @unlink($tmp);
+        }
+        $this->assertStringContainsString('"slot":"previous"', $log);
+    }
+
+    // ---- Redaction canary (S2) -------------------------------------------
+
+    public function test_no_secret_in_log_on_short_secret(): void {
+        $sentinel = 'Sn3tin3lSecretValueDoNotLeakMe';
+        set_config('webhook_secret_current', $sentinel, 'local_fastpix');
+        $signature = $this->sign(self::BODY, $sentinel);
+
+        $tmp = tempnam(sys_get_temp_dir(), 'verlog_');
+        $original = ini_get('error_log');
+        ini_set('error_log', $tmp);
+        try {
+            verifier::instance()->verify(self::BODY, $signature);
+            $log = (string)file_get_contents($tmp);
+        } finally {
+            ini_set('error_log', $original);
+            @unlink($tmp);
+        }
+        $this->assertStringNotContainsString($sentinel, $log);
+        $this->assertStringNotContainsString($signature, $log);
+        $this->assertStringContainsString('webhook.secret_too_short', $log);
+    }
 }

@@ -123,4 +123,18 @@ class rate_limiter_service_test extends \advanced_testcase {
         rate_limiter_service::reset();
         $this->assertNotSame($first, rate_limiter_service::instance());
     }
+
+    public function test_allow_replaces_corrupt_cached_bucket_with_fresh_one(): void {
+        $ip = '203.0.113.99';
+        $key = 'rl_' . substr(hash('sha256', $ip), 0, 32);
+        \cache::make('local_fastpix', 'rate_limit')->set($key, 'not-an-object');
+        $this->assertTrue(rate_limiter_service::instance()->allow($ip));
+    }
+
+    public function test_allow_replaces_object_missing_fields_with_fresh_bucket(): void {
+        $ip = '203.0.113.100';
+        $key = 'rl_' . substr(hash('sha256', $ip), 0, 32);
+        \cache::make('local_fastpix', 'rate_limit')->set($key, (object)['foo' => 1]);
+        $this->assertTrue(rate_limiter_service::instance()->allow($ip));
+    }
 }

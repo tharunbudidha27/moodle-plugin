@@ -312,5 +312,269 @@ class gateway_test extends \advanced_testcase {
         $this->assertStringNotContainsString('apikey-VERY-SECRET-VALUE', $log_buffer);
         $this->assertStringNotContainsString('apisecret-EVEN-MORE-SECRET', $log_buffer);
         $this->assertDoesNotMatchRegularExpression('/eyJ[A-Za-z0-9_-]{10,}/', $log_buffer);
+
+        // M2 — new structured fields must be present.
+        $this->assertStringContainsString('"request_id":"req_', $log_buffer);
+        $this->assertStringContainsString('"method":"GET"', $log_buffer);
+        $this->assertStringContainsString('"host":"api.fastpix.io"', $log_buffer);
+        $this->assertMatchesRegularExpression('#"path":"\\\\?/v1\\\\?/on-demand\\\\?/abc"#', $log_buffer);
+    }
+
+    public function test_request_id_propagated_as_x_request_id_header(): void {
+        $captured = null;
+        $http = $this->createMock(\core\http_client::class);
+        $http->expects($this->once())
+            ->method('request')
+            ->with(
+                'GET',
+                $this->anything(),
+                $this->callback(function ($opts) use (&$captured) {
+                    $captured = $opts['headers']['X-Request-Id'] ?? null;
+                    return true;
+                })
+            )
+            ->willReturn(new Response(200, [], json_encode(['id' => 'x'])));
+
+        $this->build_gateway($http)->get_media('x');
+
+        $this->assertNotNull($captured);
+        $this->assertMatchesRegularExpression('/^req_[A-Za-z0-9]{12}$/', (string)$captured);
+    }
+
+    public function test_response_over_5mib_throws_gateway_invalid_response(): void {
+        $oversize = 5 * 1024 * 1024 + 1;
+        $http = $this->createMock(\core\http_client::class);
+        $http->method('request')->willReturn(
+            new Response(200, ['Content-Length' => (string)$oversize], json_encode(['id' => 'big']))
+        );
+
+        $this->expectException(\local_fastpix\exception\gateway_invalid_response::class);
+        $this->expectExceptionMessage('response_too_large');
+        $this->build_gateway($http)->get_media('asset-big');
+    }
+
+    public function test_408_request_timeout_is_retried(): void {
+        $http = $this->createMock(\core\http_client::class);
+        $http->expects($this->exactly(3))
+            ->method('request')
+            ->willReturn(new Response(408, [], 'timeout'));
+
+        $gateway = $this->build_gateway($http);
+
+        $this->expectException(\local_fastpix\exception\gateway_unavailable::class);
+        $this->expectExceptionMessageMatches('/retries_exhausted/');
+        $gateway->get_media('asset-408');
+    }
+
+    public function test_breaker_state_visible_across_workers(): void {
+        // Worker A — same endpoint 5 times so the per-endpoint counter trips.
+        $http_a = $this->createMock(\core\http_client::class);
+        $http_a->method('request')->willReturn(new Response(400, [], 'bad request'));
+        $gateway_a = $this->build_gateway($http_a);
+        for ($i = 0; $i < 5; $i++) {
+            try { $gateway_a->delete_media('asset-same'); } catch (\Throwable $e) { /* expected */ }
+        }
+
+        // Worker B — separate gateway instance, separate http mock; breaker
+        // state is MUC-backed (W8) so worker B must see open and short-circuit.
+        gateway::reset();
+        $http_b = $this->createMock(\core\http_client::class);
+        $http_b->expects($this->never())->method('request');
+        $gateway_b = $this->build_gateway($http_b);
+
+        $this->expectException(\local_fastpix\exception\gateway_unavailable::class);
+        $this->expectExceptionMessageMatches('/circuit_open:/');
+        $gateway_b->delete_media('asset-same');
+    }
+
+    public function test_decode_body_empty_response_returns_empty_object(): void {
+        $http = $this->createMock(\core\http_client::class);
+        $http->method('request')->willReturn(new Response(200, [], ''));
+        $result = $this->build_gateway($http)->get_media('empty');
+        $this->assertEquals(new \stdClass(), $result);
+    }
+
+    public function test_decode_body_invalid_json_throws_gateway_invalid_response(): void {
+        $http = $this->createMock(\core\http_client::class);
+        $http->method('request')->willReturn(new Response(200, [], 'totally not json'));
+        $this->expectException(\local_fastpix\exception\gateway_invalid_response::class);
+        $this->expectExceptionMessage('json_decode_failed');
+        $this->build_gateway($http)->get_media('bad-json');
+    }
+
+    public function test_decode_body_array_response_wrapped_in_data_object(): void {
+        $http = $this->createMock(\core\http_client::class);
+        $http->method('request')->willReturn(new Response(200, [], json_encode(['a', 'b'])));
+        $result = $this->build_gateway($http)->get_media('arr');
+        $this->assertIsArray($result->data);
+        $this->assertSame(['a', 'b'], $result->data);
+    }
+
+    public function test_429_with_missing_retry_after_falls_back_to_default(): void {
+        $http = $this->createMock(\core\http_client::class);
+        $http->expects($this->exactly(2))
+            ->method('request')
+            ->willReturnOnConsecutiveCalls(
+                new Response(429, [], ''),
+                new Response(200, [], json_encode(['ok' => true])),
+            );
+        $result = $this->build_gateway($http)->get_media('ra-missing');
+        $this->assertTrue((bool)($result->ok ?? false));
+    }
+
+    public function test_429_with_non_digit_retry_after_falls_back_to_default(): void {
+        $http = $this->createMock(\core\http_client::class);
+        $http->expects($this->exactly(2))
+            ->method('request')
+            ->willReturnOnConsecutiveCalls(
+                new Response(429, ['Retry-After' => 'Sat, 01 Jan 2030 00:00:00 GMT'], ''),
+                new Response(200, [], json_encode(['ok' => true])),
+            );
+        $result = $this->build_gateway($http)->get_media('ra-date');
+        $this->assertTrue((bool)($result->ok ?? false));
+    }
+
+    public function test_body_snippet_truncates_long_response_bodies_in_exception(): void {
+        $long = str_repeat('x', 1200);
+        $http = $this->createMock(\core\http_client::class);
+        $http->method('request')->willReturn(new Response(400, [], $long));
+        try {
+            $this->build_gateway($http)->delete_media('long-err');
+            $this->fail('expected gateway_unavailable');
+        } catch (\local_fastpix\exception\gateway_unavailable $e) {
+            $context = (string)$e->a;
+            $this->assertStringContainsString('...', $context);
+            $this->assertLessThan(900, strlen($context));
+        }
+    }
+
+    public function test_create_signing_key_posts_to_iam_endpoint_with_idempotency_key(): void {
+        $captured = null;
+        $http = $this->createMock(\core\http_client::class);
+        $http->expects($this->once())
+            ->method('request')
+            ->with(
+                'POST',
+                $this->stringContains('/v1/iam/signing-keys'),
+                $this->callback(function ($opts) use (&$captured) {
+                    $captured = $opts;
+                    return isset($opts['headers']['Idempotency-Key']);
+                })
+            )
+            ->willReturn(new Response(201, [], json_encode([
+                'id'         => 'kid-new',
+                'privateKey' => 'BASE64_PEM',
+            ])));
+
+        $result = $this->build_gateway($http)->create_signing_key();
+        $this->assertSame('kid-new', $result->id);
+        $this->assertSame(64, strlen($captured['headers']['Idempotency-Key']));
+    }
+
+    public function test_delete_signing_key_targets_iam_endpoint_and_404_is_silent(): void {
+        $http = $this->createMock(\core\http_client::class);
+        $http->expects($this->once())
+            ->method('request')
+            ->with('DELETE', $this->stringContains('/v1/iam/signing-keys/kid-1'), $this->anything())
+            ->willReturn(new Response(204, [], ''));
+        $this->build_gateway($http)->delete_signing_key('kid-1');
+        $this->addToAssertionCount(1);
+
+        // 404 must be silent for DELETE — idempotent success.
+        $http2 = $this->createMock(\core\http_client::class);
+        $http2->method('request')->willReturn(new Response(404, [], ''));
+        $this->build_gateway($http2)->delete_signing_key('kid-gone');
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_media_create_from_url_posts_to_on_demand(): void {
+        $http = $this->createMock(\core\http_client::class);
+        $http->expects($this->once())
+            ->method('request')
+            ->with(
+                'POST',
+                $this->stringContains('/v1/on-demand'),
+                $this->callback(fn($o) =>
+                    is_array($o['json'])
+                    && $o['json']['inputs'][0]['url'] === 'https://example.com/v.mp4'
+                    && $o['json']['accessPolicy'] === 'public'
+                )
+            )
+            ->willReturn(new Response(201, [], json_encode([
+                'data' => ['id' => 'm-url-1'],
+            ])));
+
+        $result = $this->build_gateway($http)->media_create_from_url(
+            'https://example.com/v.mp4', 'owner-hash', [], 'public', null
+        );
+        $this->assertSame('m-url-1', $result->data->id);
+    }
+
+    public function test_media_create_from_url_attaches_drm_config_when_drm(): void {
+        $http = $this->createMock(\core\http_client::class);
+        $http->expects($this->once())
+            ->method('request')
+            ->with(
+                'POST',
+                $this->anything(),
+                $this->callback(fn($o) =>
+                    is_array($o['json'])
+                    && ($o['json']['drmConfigurationId'] ?? null) === 'drm-cfg-123'
+                )
+            )
+            ->willReturn(new Response(201, [], json_encode(['data' => ['id' => 'm-drm-1']])));
+
+        $this->build_gateway($http)->media_create_from_url(
+            'https://example.com/v.mp4', 'owner-hash', [], 'drm', 'drm-cfg-123'
+        );
+    }
+
+    public function test_health_probe_returns_false_on_throwing_http_client(): void {
+        $http = $this->createMock(\core\http_client::class);
+        $http->method('request')->willThrowException(new \RuntimeException('network down'));
+        $this->assertFalse($this->build_gateway($http)->health_probe());
+    }
+
+    public function test_network_exception_logs_attempt_with_status_code_zero(): void {
+        $http = $this->createMock(\core\http_client::class);
+        $http->method('request')
+            ->willThrowException(new \RuntimeException('network down'));
+
+        $tmp = tempnam(sys_get_temp_dir(), 'gwlog_');
+        $original = ini_get('error_log');
+        ini_set('error_log', $tmp);
+        try {
+            try {
+                $this->build_gateway($http)->get_media('x');
+                $this->fail('expected gateway_unavailable');
+            } catch (\local_fastpix\exception\gateway_unavailable $e) {
+                $this->assertStringContainsString('network_RuntimeException', (string)$e->a);
+            }
+            $log = (string)file_get_contents($tmp);
+        } finally {
+            ini_set('error_log', $original);
+            @unlink($tmp);
+        }
+        $this->assertStringContainsString('"status_code":0', $log);
+    }
+
+    public function test_breaker_recovers_after_successful_request(): void {
+        // Mix of failures then a success — success must clear the breaker.
+        $http = $this->createMock(\core\http_client::class);
+        $http->expects($this->exactly(2))
+            ->method('request')
+            ->willReturnOnConsecutiveCalls(
+                new Response(400, [], 'fail'),
+                new Response(204, [], ''),
+            );
+        $gateway = $this->build_gateway($http);
+
+        try { $gateway->delete_media('flaky'); } catch (\Throwable $e) { /* expected */ }
+        // Same endpoint; second call succeeds — breaker counter must NOT trip.
+        $gateway->delete_media('flaky');
+
+        $breaker = \cache::make('local_fastpix', 'circuit_breaker');
+        $state = $breaker->get(substr(hash('sha256', 'DELETE:/v1/on-demand/flaky'), 0, 32));
+        $this->assertFalse($state, 'breaker_record_success must clear the cache entry');
     }
 }
