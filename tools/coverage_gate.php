@@ -44,6 +44,23 @@ if ($argc < 2) {
     exit(2);
 }
 
+// ---- Load ADR-014 exemption list ----------------------------------------
+$exemptions_path = __DIR__ . '/coverage_exemptions.json';
+if (!is_readable($exemptions_path)) {
+    fwrite(STDERR, "coverage_gate: missing exemption list at {$exemptions_path}\n");
+    fwrite(STDERR, "  Required by ADR-014. Refusing to run rather than silently pass.\n");
+    exit(2);
+}
+$exemptions = json_decode((string)file_get_contents($exemptions_path), true);
+if (!is_array($exemptions) || !isset($exemptions['exempt_classes']) || !is_array($exemptions['exempt_classes'])) {
+    fwrite(STDERR, "coverage_gate: malformed exemption list at {$exemptions_path}\n");
+    exit(2);
+}
+$exempt = array_flip(array_map(
+    static fn($fqn) => ltrim((string)$fqn, '\\'),
+    $exemptions['exempt_classes']
+));
+
 $clover_path = $argv[1];
 if (!is_readable($clover_path)) {
     fwrite(STDERR, "coverage_gate: cannot read {$clover_path}\n");
@@ -66,6 +83,7 @@ if ($doc === false || !empty($errors)) {
 
 $shortfalls = [];
 $passes = [];
+$exempted = [];
 
 foreach ($doc->project->file ?? [] as $file) {
     $filename = (string)$file['name'];
@@ -96,6 +114,12 @@ foreach ($doc->project->file ?? [] as $file) {
         // for every class that ran (Moodle core helpers, vendor libs,
         // etc.); enforcing targets on those is out of scope.
         if (!str_starts_with($fqn, NAMESPACE_PREFIX)) {
+            continue;
+        }
+
+        // ADR-014 exemption — record but do not gate.
+        if (isset($exempt[$fqn])) {
+            $exempted[] = $fqn;
             continue;
         }
 
@@ -143,8 +167,15 @@ foreach ($passes as $p) {
     echo $p . "\n";
 }
 
+if (!empty($exempted)) {
+    echo "\nExempt (" . count($exempted) . ") — ADR-014 coverage-exemptions:\n";
+    foreach ($exempted as $fqn) {
+        echo "  EXEMPT (ADR-014)  {$fqn}\n";
+    }
+}
+
 if (empty($shortfalls)) {
-    echo "\nAll classes meet their coverage targets.\n";
+    echo "\nAll non-exempt classes meet their coverage targets.\n";
     exit(0);
 }
 

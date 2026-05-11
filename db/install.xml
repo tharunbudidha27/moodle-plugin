@@ -96,18 +96,6 @@
       </INDEXES>
     </TABLE>
 
-    <TABLE NAME="local_fastpix_sync_state" COMMENT="Reconciler cursor (reserved for ADR-003)">
-      <FIELDS>
-        <FIELD NAME="id"           TYPE="int"  LENGTH="10" NOTNULL="true" SEQUENCE="true"/>
-        <FIELD NAME="cursor_key"   TYPE="char" LENGTH="64" NOTNULL="true"/>
-        <FIELD NAME="cursor_value" TYPE="text"             NOTNULL="true"/>
-        <FIELD NAME="updated_at"   TYPE="int"  LENGTH="10" NOTNULL="true"/>
-      </FIELDS>
-      <KEYS>
-        <KEY NAME="primary" TYPE="primary" FIELDS="id"/>
-        <KEY NAME="uk_key"  TYPE="unique"  FIELDS="cursor_key"/>
-      </KEYS>
-    </TABLE>
 
   </TABLES>
 </XMLDB>

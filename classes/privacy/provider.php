@@ -105,7 +105,12 @@ class provider implements
         $now = time();
 
         // Mark every still-live asset for GDPR-pending deletion. The
-        // asset_cleanup scheduled task hard-deletes after 90 days.
+        // Retention windows declared on this plugin:
+        //   - local_fastpix_webhook_event: 90 days (webhook_event_pruner, rule W9)
+        //   - local_fastpix_asset soft-delete → hard-delete: 7 days
+        //     (purge_soft_deleted_assets, rule W10)
+        //   - local_fastpix_asset GDPR-pending → hard-delete: 90 days
+        //     (asset_cleanup, GDPR retry path)
         $DB->set_field_select(
             'local_fastpix_asset', 'gdpr_delete_pending_at', $now,
             'gdpr_delete_pending_at IS NULL AND deleted_at IS NULL',

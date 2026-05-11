@@ -70,6 +70,26 @@ class asset_service {
     }
 
     /**
+     * Lookup an asset by upload_session id. ADR-013 §2 entry point.
+     *
+     * Returns null when the session row doesn't exist, has no fastpix_id
+     * yet (webhook still in flight), or the linked asset row is
+     * soft-deleted. Caching contract piggybacks on get_by_fastpix_id.
+     */
+    public static function get_by_upload_session_id(int $session_id): ?\stdClass {
+        global $DB;
+        $session = $DB->get_record(
+            'local_fastpix_upload_session',
+            ['id' => $session_id],
+            'id, fastpix_id'
+        );
+        if (!$session || empty($session->fastpix_id)) {
+            return null;
+        }
+        return self::get_by_fastpix_id((string)$session->fastpix_id);
+    }
+
+    /**
      * Read-path lazy fetch. May call the gateway exactly once on cold start.
      * Forbidden on write paths (rule W7).
      */
@@ -228,11 +248,11 @@ class asset_service {
      * to keep the fastpix_id and playback_id namespaces disjoint.
      */
     private static function cache_key_fastpix(string $fastpix_id): string {
-        return 'fp_' . substr(hash('sha256', $fastpix_id), 0, 32);
+        return \local_fastpix\util\cache_keys::fastpix($fastpix_id);
     }
 
     private static function cache_key_playback(string $playback_id): string {
-        return 'pb_' . substr(hash('sha256', $playback_id), 0, 32);
+        return \local_fastpix\util\cache_keys::playback($playback_id);
     }
 
     private static function invalidate_cache(string $fastpix_id, ?string $playback_id): void {

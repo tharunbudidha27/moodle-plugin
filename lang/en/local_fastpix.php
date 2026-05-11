@@ -64,3 +64,35 @@ $string['privacy:metadata:upload_session:timecreated']  = 'When the upload sessi
 $string['privacy:metadata:fastpix']                     = 'FastPix.io — external video hosting service';
 $string['privacy:metadata:fastpix:owner_userhash']      = 'An HMAC-derived hash of the user ID (no plaintext PII sent)';
 $string['privacy:metadata:fastpix:site_url']            = 'The Moodle site URL (used for cross-asset audit)';
+// v1.0 cleanup — new strings.
+$string['task_purge_soft_deleted_assets'] = 'Hard-purge soft-deleted assets after 7 days';
+$string['event_webhook_secret_rotated']   = 'Webhook signing secret rotated';
+
+$string['exception_asset_not_ready'] = 'Asset exists but is not yet ready for playback';
+
+$string['settings_credentials']             = 'API credentials';
+$string['settings_features']                = 'Feature flags';
+$string['settings_webhooks']                = 'Webhooks';
+$string['settings_webhooks_desc']           = 'FastPix posts events to the webhook URL below. Paste the signing secret from the FastPix dashboard into the field at the bottom of this section; rotation is automatic with a 30-minute rollover window.';
+$string['setting_section_upload_defaults']  = 'Upload defaults';
+$string['setting_default_access_policy']    = 'Default access policy';
+$string['setting_default_access_policy_desc'] = 'Access policy applied to new uploads when the caller does not specify one explicitly. public plays without a token; private requires a JWT; drm requires JWT + DRM Configuration ID.';
+$string['setting_max_resolution']           = 'Default maximum resolution';
+$string['setting_max_resolution_desc']      = 'Cap applied to new uploads at FastPix transcode time.';
+$string['setting_webhook_secret']           = 'Webhook signing secret';
+$string['setting_webhook_secret_desc']      = 'Paste the signing secret FastPix generated for this webhook URL. The verifier honors the previous value for 30 minutes after each save (rollover window).';
+$string['setting_webhook_secret_too_short'] = 'Webhook secret must be at least 32 characters; FastPix generates 64-character secrets by default.';
+$string['webhook_secret_not_configured_notice'] = 'Webhook signing secret is not configured. FastPix events will be rejected until you paste the secret from the FastPix dashboard below.';
+
+$string['button_test_connection']      = 'Test connection';
+$string['button_test_connection_desc'] = 'Sends a no-write GET to FastPix using the configured credentials and reports latency. Useful immediately after pasting new credentials.';
+$string['button_send_test_event']      = 'Send test event';
+$string['button_send_test_event_desc'] = 'Fires a synthetic signed webhook event into the local processor to verify the ingestion pipeline end-to-end without involving FastPix.';
+
+$string['test_connection_running'] = 'Probing…';
+$string['test_connection_success'] = 'Connected (latency {$a} ms)';
+$string['test_connection_failed']  = 'Failed: {$a}';
+
+$string['send_test_event_running'] = 'Sending…';
+$string['send_test_event_success'] = 'Test event delivered (ledger id {$a})';
+$string['send_test_event_failed']  = 'Failed: {$a}';

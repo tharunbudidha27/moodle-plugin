@@ -29,6 +29,7 @@ class jwt_signing_service {
             'kid' => $kid,
             'aud' => 'media:' . $playback_id,
             'iss' => self::ISS,
+            // reserved; do NOT fill with userid — would violate S9 (raw userid in JWT payload).
             'sub' => '',
             'iat' => $now,
             'exp' => $now + ($ttl ?? self::TOKEN_TTL_SECONDS),

@@ -85,6 +85,18 @@ class upload_service {
 
         $this->assert_drm_gate($drm_required);
 
+        // Dedup window: same (userid, source_url) within 60s returns the
+        // existing session row. Mirrors the file-upload dedup contract (W11).
+        $cache = \cache::make('local_fastpix', 'upload_dedup');
+        $hash_key = $this->dedup_key_url($userid, $source_url);
+        $existing_id = $cache->get($hash_key);
+        if (is_int($existing_id) || (is_string($existing_id) && ctype_digit($existing_id))) {
+            $existing = $this->lookup_session((int)$existing_id);
+            if ($existing !== null && $existing->expires_at > time()) {
+                return $this->build_response($existing, deduped: true);
+            }
+        }
+
         $owner_hash = $this->owner_hash($userid);
         $access_policy = $drm_required ? 'drm' : 'private';
         $drm_config_id = $drm_required
@@ -112,6 +124,8 @@ class upload_service {
             upload_url: '',
             source_url: $source_url,
         );
+
+        $cache->set($hash_key, $session->id);
 
         return $this->build_response($session, deduped: false);
     }
@@ -162,6 +176,15 @@ class upload_service {
         $logical  = "upload:{$userid}:" . hash('sha256', $filename . '|' . $size);
         // 'upload_dedup' MUC area uses simplekeys=true; hash to alphanumeric.
         return 'ud_' . substr(hash('sha256', $logical), 0, 32);
+    }
+
+    /**
+     * Dedup key for URL-pull sessions. Same (userid, source_url) within the
+     * 60-second window returns the existing session_id with deduped=true.
+     */
+    private function dedup_key_url(int $userid, string $source_url): string {
+        $logical = "urlpull:{$userid}:" . hash('sha256', $source_url);
+        return 'up_' . substr(hash('sha256', $logical), 0, 32);
     }
 
     private function owner_hash(int $userid): string {

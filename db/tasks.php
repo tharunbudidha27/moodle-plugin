@@ -39,6 +39,15 @@ $tasks = [
         'month'     => '*',
     ],
     [
+        'classname' => '\local_fastpix\task\purge_soft_deleted_assets',
+        'blocking'  => 0,
+        'minute'    => '30',
+        'hour'      => '2',
+        'day'       => '*',
+        'dayofweek' => '*',
+        'month'     => '*',
+    ],
+    [
         'classname' => '\local_fastpix\task\signing_key_rotator',
         'blocking'  => 0,
         'minute'    => '11',

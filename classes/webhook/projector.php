@@ -83,6 +83,10 @@ class projector {
         // concurrent reader cannot repopulate stale data before this writer
         // releases.
         $this->invalidate_cache((string)$row->fastpix_id, $row->playback_id ?? null);
+
+        // After projecting media events, link any matching upload_session
+        // row by upload_id == fastpix_id (URL pulls + direct uploads).
+        $this->link_upload_session((string)$row->fastpix_id);
     }
 
     private function is_media_object(string $object_type): bool {
@@ -120,27 +124,32 @@ class projector {
 
         switch ($type) {
             case 'video.media.created':
-                // The insert path already populated $row; nothing more to apply.
+                // Real FastPix `video.media.created` carries data.playbackIds
+                // (observed 2026-05-08). Insert path also reads them, but if
+                // the row was inserted from an earlier `.upload` event the
+                // playback id needs to be applied here.
+                $this->apply_first_playback_id($data, $row);
+                return true;
+
+            case 'video.media.upload':
+                if (isset($data->status)) {
+                    $row->status = (string)$data->status;
+                }
+                return true;
+
+            case 'video.upload.media_created':
+                $this->apply_first_playback_id($data, $row);
+                if ($row->status === 'waiting' || $row->status === '') {
+                    $row->status = 'created';
+                }
                 return true;
 
             case 'video.media.ready':
                 $row->status = 'ready';
-
-                $access_policy = (string)($data->accessPolicy ?? $row->access_policy ?? 'private');
-                if (!empty($data->playbackIds) && is_array($data->playbackIds)) {
-                    foreach ($data->playbackIds as $pb) {
-                        $policy = (string)($pb->accessPolicy ?? '');
-                        if (in_array($policy, ['private', 'drm'], true)) {
-                            $row->playback_id = (string)$pb->id;
-                            $access_policy = $policy;
-                            break;
-                        }
-                    }
-                }
-                $row->access_policy = $access_policy;
-                $row->drm_required  = $access_policy === 'drm' ? 1 : 0;
-                if (isset($data->duration)) {
-                    $row->duration = $data->duration;
+                $this->apply_first_playback_id($data, $row);
+                $duration = $this->parse_duration($data->duration ?? null);
+                if ($duration !== null) {
+                    $row->duration = $duration;
                 }
                 $row->has_captions = $this->count_caption_tracks($data) > 0 ? 1 : 0;
                 return true;
@@ -149,8 +158,9 @@ class projector {
                 if (isset($data->status)) {
                     $row->status = (string)$data->status;
                 }
-                if (isset($data->duration)) {
-                    $row->duration = $data->duration;
+                $duration = $this->parse_duration($data->duration ?? null);
+                if ($duration !== null) {
+                    $row->duration = $duration;
                 }
                 return true;
 
@@ -193,8 +203,69 @@ class projector {
             'timecreated'            => $now,
             'timemodified'           => $now,
         ];
+        $this->apply_first_playback_id($data, $row);
         $row->id = $DB->insert_record(self::TABLE, $row);
         return $row;
+    }
+
+    /**
+     * Extract the first entry from data.playbackIds and write it onto $row.
+     * Accepts public/private/drm. No-op when the event carries no
+     * playbackIds. FastPix's real video.media.created and video.media.ready
+     * payloads carry playbackIds with accessPolicy "public" by default
+     * (observed 2026-05-08).
+     */
+    private function apply_first_playback_id(\stdClass $data, \stdClass $row): void {
+        if (empty($data->playbackIds) || !is_array($data->playbackIds)) {
+            return;
+        }
+        $pb = (object)$data->playbackIds[0];
+        $id = (string)($pb->id ?? '');
+        if ($id === '') {
+            return;
+        }
+        $row->playback_id = $id;
+        $policy = (string)($pb->accessPolicy ?? '');
+        if (in_array($policy, ['public', 'private', 'drm'], true)) {
+            $row->access_policy = $policy;
+            $row->drm_required  = $policy === 'drm' ? 1 : 0;
+        }
+    }
+
+    /**
+     * FastPix sends duration as either a numeric (legacy test fixtures) or
+     * "HH:MM:SS[.fff]" (real direct-upload deliveries). The DB column is
+     * numeric(10,3); a raw "HH:MM:SS" write throws dml_write_exception.
+     * Returns null when value is missing/unparseable so caller leaves the
+     * existing column value alone.
+     */
+    private function parse_duration($value): ?float {
+        if ($value === null || $value === '') {
+            return null;
+        }
+        if (is_numeric($value)) {
+            return (float)$value;
+        }
+        if (is_string($value) && preg_match('/^(\d+):(\d+):(\d+(?:\.\d+)?)$/', $value, $m)) {
+            return ((int)$m[1]) * 3600 + ((int)$m[2]) * 60 + (float)$m[3];
+        }
+        return null;
+    }
+
+    /**
+     * FastPix uses one UUID for both upload-session and media on URL pulls.
+     * Link any matching upload_session row so consumers can navigate
+     * session_id → fastpix_id → asset. Idempotent — only touches rows
+     * whose fastpix_id is still null.
+     */
+    private function link_upload_session(string $fastpix_id): void {
+        global $DB;
+        $DB->execute(
+            "UPDATE {local_fastpix_upload_session}
+                SET fastpix_id = :fpid, state = 'created'
+              WHERE upload_id = :upid AND fastpix_id IS NULL",
+            ['fpid' => $fastpix_id, 'upid' => $fastpix_id]
+        );
     }
 
     private function count_caption_tracks(\stdClass $data): int {
@@ -215,17 +286,22 @@ class projector {
 
     private function invalidate_cache(string $fastpix_id, ?string $playback_id): void {
         $cache = \cache::make('local_fastpix', 'asset');
-        $cache->delete($this->cache_key_fastpix($fastpix_id));
+        $cache->delete(\local_fastpix\util\cache_keys::fastpix($fastpix_id));
         if (!empty($playback_id)) {
-            $cache->delete($this->cache_key_playback($playback_id));
+            $cache->delete(\local_fastpix\util\cache_keys::playback($playback_id));
         }
     }
 
+    /**
+     * Reflection seam for tests that verify the projector targets the same
+     * keys as asset_service. Formula lives in
+     * \local_fastpix\util\cache_keys.
+     */
     private function cache_key_fastpix(string $fastpix_id): string {
-        return 'fp_' . substr(hash('sha256', $fastpix_id), 0, 32);
+        return \local_fastpix\util\cache_keys::fastpix($fastpix_id);
     }
 
     private function cache_key_playback(string $playback_id): string {
-        return 'pb_' . substr(hash('sha256', $playback_id), 0, 32);
+        return \local_fastpix\util\cache_keys::playback($playback_id);
     }
 }

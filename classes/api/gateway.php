@@ -32,6 +32,9 @@ class gateway {
 
     private const DEFAULT_BASE_URL = 'https://api.fastpix.io';
 
+    /** Max response body length the gateway will decode (defensive). */
+    private const MAX_RESPONSE_BYTES = 5242880; // 5 MiB
+
     private static ?self $instance = null;
 
     private function __construct(
@@ -177,9 +180,10 @@ class gateway {
                 'connect_timeout' => self::PROFILE_HEALTH['connect'],
                 'timeout'         => self::PROFILE_HEALTH['read'],
                 'auth'            => [$this->credentials->apikey(), $this->credentials->apisecret()],
-                'headers'         => $this->build_headers(null),
-                'query'           => ['limit' => 1],
-                'http_errors'     => false,
+                'headers'          => $this->build_headers(null),
+                'query'            => ['limit' => 1],
+                'http_errors'      => false,
+                'force_ip_resolve' => 'v4',
             ]);
             $status = $response->getStatusCode();
             return $status >= 200 && $status < 300;
@@ -198,9 +202,11 @@ class gateway {
         ?string $idempotency_key,
     ): \stdClass {
         $endpoint_key = $this->endpoint_key($method, $path);
+        $request_id   = 'req_' . random_string(12);
+        $host         = $this->host_from_base();
 
         if ($this->breaker_is_open($endpoint_key)) {
-            $this->log_call($endpoint_key, 0, 0, 0, $profile, 'open');
+            $this->log_call($endpoint_key, 0, 0, 0, $profile, 'open', $method, $host, $path, $request_id);
             throw new gateway_unavailable("circuit_open:{$endpoint_key}");
         }
 
@@ -215,17 +221,22 @@ class gateway {
 
             try {
                 $response = $this->http->request($method, $this->base_url() . $path, [
-                    'connect_timeout' => $profile['connect'],
-                    'timeout'         => $profile['read'],
-                    'auth'            => [$this->credentials->apikey(), $this->credentials->apisecret()],
-                    'headers'         => $this->build_headers($idempotency_key),
-                    'json'            => $body,
-                    'http_errors'     => false,
+                    'connect_timeout'  => $profile['connect'],
+                    'timeout'          => $profile['read'],
+                    'auth'             => [$this->credentials->apikey(), $this->credentials->apisecret()],
+                    'headers'          => $this->build_headers($idempotency_key, $request_id),
+                    'json'             => $body,
+                    'http_errors'      => false,
+                    // FastPix's CDN advertises AAAA records; many container
+                    // bridge networks have no IPv6 route. Pin to v4 so
+                    // Happy-Eyeballs doesn't intermittently pick a route
+                    // that immediately fails with ConnectException.
+                    'force_ip_resolve' => 'v4',
                 ]);
 
                 $status = $response->getStatusCode();
                 $latency_ms = (int)((microtime(true) - $start) * 1000);
-                $this->log_call($endpoint_key, $latency_ms, $status, $attempt, $profile, 'closed');
+                $this->log_call($endpoint_key, $latency_ms, $status, $attempt, $profile, 'closed', $method, $host, $path, $request_id);
 
                 if ($status >= 200 && $status < 300) {
                     $this->breaker_record_success($endpoint_key);
@@ -261,10 +272,13 @@ class gateway {
                 throw $e;
             } catch (gateway_unavailable $e) {
                 throw $e;
+            } catch (gateway_invalid_response $e) {
+                // response_too_large / json_decode_failed — not transient, no retry.
+                throw $e;
             } catch (\Throwable $e) {
                 $last_error = 'network_' . (new \ReflectionClass($e))->getShortName();
                 $delay_ms = self::RETRY_DELAYS_MS[$attempt - 1] + random_int(-self::RETRY_JITTER_MS, self::RETRY_JITTER_MS);
-                $this->log_call($endpoint_key, (int)((microtime(true) - $start) * 1000), 0, $attempt, $profile, 'closed');
+                $this->log_call($endpoint_key, (int)((microtime(true) - $start) * 1000), 0, $attempt, $profile, 'closed', $method, $host, $path, $request_id);
             }
 
             if ($attempt < self::RETRY_MAX_ATTEMPTS && $delay_ms > 0) {
@@ -293,7 +307,9 @@ class gateway {
     }
 
     private function is_retryable(int $status): bool {
-        return in_array($status, [429, 500, 502, 503, 504], true);
+        // 408 (Request Timeout) is transient under sustained load; retry per
+        // FastPix docs.
+        return in_array($status, [408, 429, 500, 502, 503, 504], true);
     }
 
     private function parse_retry_after($response): int {
@@ -305,7 +321,15 @@ class gateway {
     }
 
     private function decode_body($response): \stdClass {
+        // Defensive bound against malicious upstream returning unbounded bytes.
+        $advertised = (int)$response->getHeaderLine('Content-Length');
+        if ($advertised > self::MAX_RESPONSE_BYTES) {
+            throw new gateway_invalid_response('response_too_large');
+        }
         $raw = (string)$response->getBody();
+        if (strlen($raw) > self::MAX_RESPONSE_BYTES) {
+            throw new gateway_invalid_response('response_too_large');
+        }
         if ($raw === '') {
             return new \stdClass();
         }
@@ -316,7 +340,7 @@ class gateway {
         return is_array($decoded) ? (object)['data' => $decoded] : $decoded;
     }
 
-    private function build_headers(?string $idempotency_key): array {
+    private function build_headers(?string $idempotency_key, ?string $request_id = null): array {
         $headers = [
             'Accept'     => 'application/json',
             'User-Agent' => 'local_fastpix/' . (string)get_config('local_fastpix', 'version'),
@@ -324,7 +348,18 @@ class gateway {
         if ($idempotency_key !== null) {
             $headers['Idempotency-Key'] = $idempotency_key;
         }
+        if ($request_id !== null && $request_id !== '') {
+            $headers['X-Request-Id'] = $request_id;
+        }
         return $headers;
+    }
+
+    /**
+     * Extract the host portion of base_url() for structured logging.
+     */
+    private function host_from_base(): string {
+        $host = parse_url($this->base_url(), PHP_URL_HOST);
+        return is_string($host) ? $host : '';
     }
 
     private function idempotency_key(string $operation, string $owner_hash, ?array $body): string {
@@ -379,13 +414,23 @@ class gateway {
         int $attempt,
         array $profile,
         string $circuit_state,
+        string $method = '',
+        string $host = '',
+        string $path = '',
+        string $request_id = '',
     ): void {
         $profile_name = $profile === self::PROFILE_HOT
             ? 'hot'
             : ($profile === self::PROFILE_HEALTH ? 'health' : 'standard');
 
+        $path_logged = $path === '' ? '' : strtok($path, '?');
+
         error_log(json_encode([
             'event'           => 'gateway.call',
+            'request_id'      => $request_id,
+            'method'          => $method,
+            'host'            => $host,
+            'path'            => $path_logged,
             'endpoint'        => $endpoint_key,
             'latency_ms'      => $latency_ms,
             'status_code'     => $status,

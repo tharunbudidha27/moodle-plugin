@@ -1,7 +1,12 @@
 <?php
 // FastPix webhook endpoint. HMAC-authenticated; no session, no sesskey.
-// Receives a verified event, idempotently records it in the ledger, and
-// enqueues an adhoc task for asynchronous projection.
+// Thin HTTP wrapper around \local_fastpix\webhook\processor::process()
+// since 2026-05-06 — the verify-then-record-then-enqueue pipeline lives
+// in the processor so the admin "Send test event" button can drive the
+// same flow without HTTP, and integration tests can do the same.
+//
+// HTTP-specific concerns stay here: body-size guard, per-IP rate limit,
+// status-code mapping. Everything else delegates.
 
 define('NO_DEBUG_DISPLAY', true);
 define('NO_MOODLE_COOKIES', true);
@@ -18,8 +23,26 @@ if ($content_length > 1048576) {
 
 // 2. Read raw body BEFORE any framework parsing.
 $raw_body = file_get_contents('php://input');
-if ($raw_body === false || strlen($raw_body) === 0) {
+if ($raw_body === false) {
     http_response_code(400);
+    die();
+}
+
+// 2a. FastPix validation ping. When the admin configures the webhook URL
+//     in FastPix's dashboard, FastPix POSTs an empty body (or '{}') to
+//     verify reachability — there's no signature on these probes. Must
+//     return 200 so FastPix accepts the URL configuration; rejecting
+//     would mark the URL as invalid in their dashboard. Validation pings
+//     are NOT real events and are NOT inserted into the ledger.
+$trimmed_body = trim($raw_body);
+if ($trimmed_body === '' || $trimmed_body === '{}') {
+    error_log(json_encode([
+        'event'       => 'webhook.validation_ping',
+        'remote_addr' => $_SERVER['REMOTE_ADDR'] ?? 'unknown',
+        'time'        => time(),
+        'shape'       => $trimmed_body === '' ? 'empty' : 'curly_braces',
+    ]));
+    http_response_code(200);
     die();
 }
 
@@ -30,67 +53,34 @@ if (!\local_fastpix\service\rate_limiter_service::instance()->allow($ip)) {
     die();
 }
 
-// 4. HMAC verification (constant-time, dual-secret rotation aware).
+// 4. Delegate to the processor.
 $signature = $_SERVER['HTTP_FASTPIX_SIGNATURE'] ?? '';
-if (!\local_fastpix\webhook\verifier::instance()->verify($raw_body, $signature)) {
-    http_response_code(401);
-    die();
+$result = \local_fastpix\webhook\processor::process($raw_body, $signature);
+
+switch ($result['result']) {
+    case \local_fastpix\webhook\processor::RESULT_ACCEPTED:
+    case \local_fastpix\webhook\processor::RESULT_DUPLICATE:
+        // Duplicate is success from FastPix's perspective — they already
+        // got a 200 for this event_id once and our ledger has it.
+        http_response_code(200);
+        break;
+
+    case \local_fastpix\webhook\processor::RESULT_BAD_SIGNATURE:
+        http_response_code(401);
+        break;
+
+    case \local_fastpix\webhook\processor::RESULT_MALFORMED_BODY:
+        http_response_code(400);
+        break;
+
+    case \local_fastpix\webhook\processor::RESULT_DB_ERROR:
+    default:
+        // Real DB bug surfaced (FK violation, NOT NULL, etc.). Return
+        // 500 so FastPix retries on its normal schedule AND ops sees
+        // it in error logs. Per I1: silently 200ing here would mask
+        // schema bugs.
+        http_response_code(500);
+        break;
 }
 
-// 5. Parse the verified payload.
-$event = json_decode($raw_body);
-if (!($event instanceof \stdClass) || empty($event->id) || empty($event->type)) {
-    http_response_code(400);
-    die();
-}
-
-// 6 + 7. Atomic ledger insert + adhoc task enqueue.
-// Per REVIEW-2026-05-04 §S-3 / T1.6 — previously the insert and the
-// queue_adhoc_task call were independent. If the task enqueue failed
-// (DB drop, OOM, lock timeout) the ledger row was committed with
-// status=pending but no task to project it; FastPix saw 200 and stopped
-// retrying. Now both happen in a single transaction so a queue failure
-// rolls the row back and FastPix's retry path kicks in.
-global $DB;
-$row = (object)[
-    'provider_event_id'     => (string)$event->id,
-    'event_type'            => (string)$event->type,
-    'event_created_at'      => (int)($event->occurredAt ?? time()),
-    'payload'               => $raw_body,
-    'signature'             => $signature,
-    'received_at'           => time(),
-    'status'                => 'pending',
-    'processing_latency_ms' => null,
-];
-
-$transaction = $DB->start_delegated_transaction();
-try {
-    $row->id = $DB->insert_record('local_fastpix_webhook_event', $row);
-
-    $task = new \local_fastpix\task\process_webhook();
-    $task->set_custom_data(['provider_event_id' => (string)$event->id]);
-    \core\task\manager::queue_adhoc_task($task);
-
-    $transaction->allow_commit();
-} catch (\dml_write_exception $e) {
-    // UNIQUE(provider_event_id) violated — FastPix retried before we
-    // ack'd, the row already exists from the earlier request. Roll back
-    // this attempt (Moodle's rollback re-throws the original, which we
-    // swallow) and 200 so FastPix stops retrying.
-    try {
-        $transaction->rollback($e);
-    } catch (\dml_write_exception $rethrown) {
-        // Expected: Moodle's rollback re-throws.
-    }
-    http_response_code(200);
-    die();
-} catch (\Throwable $e) {
-    // Any other failure (queue_adhoc_task threw, DB went away mid-insert,
-    // etc.) — rollback re-throws and Moodle's error handler returns 5xx.
-    // FastPix will retry; idempotent insert wins next time.
-    $transaction->rollback($e);
-}
-
-// 8. Done — return fast so FastPix doesn't retry.
-http_response_code(200);
 die();
