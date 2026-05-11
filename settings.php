@@ -109,13 +109,19 @@ $settings->add(new admin_setting_description(
         'button_test_connection_desc',
     ),
 ));
-if (isset($PAGE) && $PAGE instanceof \moodle_page) {
-    $PAGE->requires->js_call_amd(
-        'local_fastpix/test_connection',
-        'init',
-        [$btn_test_connection_id, $btn_test_connection_status_id],
-    );
-}
+// Button JS binding intentionally NOT loaded here. The grunt-built AMD
+// bundle is hand-crafted (no node toolchain in the dev container) and
+// historically cascades into Moodle's first.js bootstrap, breaking the
+// admin password-unmask widget on this same page. Restore the
+// js_call_amd line below once amd/build/test_connection.min.js is
+// produced by `npx grunt amd --root=local/fastpix` on a host with node.
+//
+// Until then the button is visual-only; ops can drive the same probe
+// via:
+//   docker exec moodle-docker-webserver-1 php -r '
+//     define("CLI_SCRIPT", true); require "config.php";
+//     echo \\local_fastpix\\api\\gateway::instance()->health_probe() ? "OK\n" : "FAIL\n";
+//   '
 
 // ---- 2. Upload defaults ---------------------------------------------------
 
@@ -241,10 +247,6 @@ $settings->add(new admin_setting_description(
         'button_send_test_event_desc',
     ),
 ));
-if (isset($PAGE) && $PAGE instanceof \moodle_page) {
-    $PAGE->requires->js_call_amd(
-        'local_fastpix/send_test_event',
-        'init',
-        [$btn_send_event_id, $btn_send_event_status_id],
-    );
-}
+// Send-test-event JS binding likewise pending a real grunt build.
+// CLI equivalent:
+//   docker exec moodle-docker-webserver-1 php local/fastpix/cli/webhook_loopback_test.php --count=1
