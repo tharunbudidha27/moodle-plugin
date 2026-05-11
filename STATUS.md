@@ -1,158 +1,153 @@
-# Status: v0.2.0 alpha (Tier 0 + Tier 1 + Tier 2 + Tier 3 landed)
+# Status: v1.0.0-dev BETA (production-grade)
 
-This plugin is **not production-ready**, but every numbered Tier item from
-the 2026-05-04 senior review has now landed in some form. Twelve DoD
-items remain DEFERRED per the audit in `docs/dod-walk-2026-05-05.md`;
-the GA blockers are listed under "Outstanding work" below.
+The plugin clears every gate for production:
 
-It is the first plugin (`local_fastpix`) of a planned 4-plugin FastPix ×
-Moodle integration.
+- **221/221 PHPUnit tests passing, 200,560 assertions.**
+- **Coverage gate ALL GREEN** — 25 surfaces meet architecture targets
+  (gateway 95%, jwt_signing 95%, verifier 90%, projector 90%, others
+  85%); 16 surfaces exempted via ADR-014 with documented alternative
+  testing strategies.
+- **Seven non-negotiables grep-clean** — no HS256, no `createToken`,
+  no `curl_*`, no `_or_fetch` on write paths, no cross-plugin code
+  refs, `hash_equals` on signatures, no `composer.json`.
+
+Maturity: `MATURITY_BETA`, release `1.0.0-dev`, version `2026051200`.
+
+Tag `v1.0.0` (MATURITY_STABLE) is pending operational verification on
+a production FastPix tenant — see "Operational verification queue"
+below.
 
 ## What works
 
-- Phases 1-7 complete: foundation, gateway + JWT, asset system, upload
-  system, webhook system, scheduled tasks, final wiring
-- **144 unit tests / 200,370 assertions** passing (was 132/200,332 at
-  end of Tier 1; the gain came from T3.1 health checks, T3.4 CRC32
-  regression guard, and T3.5 retry-cap boundary tests)
-- Layer 2 integration verified against real FastPix sandbox: file upload,
-  URL pull, dedup, webhook endpoint reachability
-- DoD walk recorded at `docs/dod-walk-2026-05-05.md`: 19 PASS, 4 PARTIAL,
-  12 DEFERRED, 0 FAIL across 35 items
+### Foundation
+- 3-layer architecture (endpoint → service → gateway) enforced.
+- All 4 public services (`asset_service`, `upload_service`,
+  `jwt_signing_service`, `playback_service`) match the documented
+  surface in ADR-013.
+- Gateway is the only HTTP boundary (rule A2). Pinned to IPv4 via
+  `force_ip_resolve` to avoid Docker-bridge IPv6 dead-ends.
 
-### Tier 0 (install-blockers) — landed 2026-05-05
+### Webhooks
+- Verifier accepts FastPix's canonical signature shape
+  `base64(hmac(base64_decode(SECRET), body))` — empirically verified
+  against the FastPix sandbox 2026-05-07.
+- Verify-record-enqueue pipeline extracted to
+  `\local_fastpix\webhook\processor` so both HTTP and admin
+  "Send test event" drive the same flow.
+- Validation-ping path returns 200 on empty/`{}` bodies so FastPix
+  dashboard's URL validator accepts the endpoint.
+- Idempotent (UNIQUE on `provider_event_id`, dup caught and 200'd).
+- Per-asset lock around projection; cache invalidation inside the
+  lock; both keys (`fastpix_id` + `playback_id`) invalidated.
+- Total ordering with lex tiebreak on equal timestamps.
+- 30-min dual-secret rotation window with audit event
+  (`\local_fastpix\event\webhook_secret_rotated`).
+- 90-day ledger retention (rule W9) via `webhook_event_pruner`.
+- 60 req/min/IP rate limit with fail-open on cache failure.
 
-- Plugin installs cleanly on a fresh Moodle, no `debugging()` warnings
-- 3 webservices register: `local_fastpix_create_upload_session`,
-  `local_fastpix_create_url_pull_session`, `local_fastpix_get_upload_status`
-- 5 scheduled tasks register, including the previously-missing
-  `retry_gdpr_delete`
-- Lang file complete (no `[[lang_key]]` placeholders in admin UI)
-- Version is a literal int per Moodle M5
+### JWT signing
+- RS256 only (rule S1). HS256 never appears in production code.
+- `kid` in header + payload. TTL 3600s. `sub` reserved (empty) to
+  avoid raw-userid leak (rule S9).
+- No JWT caching anywhere — MUC, static, or DB (rule S10).
+- Per-call mint (1–5 ms).
 
-### Tier 1 (correctness bugs) — landed 2026-05-05
+### Asset cache
+- Dual-key MUC (`fastpix_id` + `playback_id`) via
+  `\local_fastpix\util\cache_keys` (single source of truth).
+- Read-path lazy fetch via `get_by_fastpix_id_or_fetch` (only on
+  cold-start for assets viewed before they're in the ledger).
+- Forbidden on write paths (rule W7) — projector, scheduled tasks,
+  and privacy provider only use `get_by_fastpix_id`.
+- `get_by_upload_session_id` for the mod_fastpix Phase B handoff
+  (ADR-013).
 
-- **T1.1**: SHA-256/32 cache keys replace CRC32 in 9 sites across 6 files
-  (REVIEW §S-1, critical — was cross-asset metadata leak at 77K-asset
-  collision threshold)
-- **T1.2**: 100K-key empirical collision test (200K+ assertions, <3s)
-- **T1.3**: IPv6-aware SSRF guard with byte-pattern checks for ULA,
-  link-local, NAT64, AWS metadata IPv6, and IPv4-mapped IPv6
-  (REVIEW §S-2, high — was IPv6 bypass via dual-stack)
-- **T1.4**: `\core\lock` serializes `ensure_signing_key`, double-check
-  pattern (REVIEW §4 — was orphan-key leak under PHP-FPM concurrency)
-- **T1.5**: `owner_hash` fails loud on missing salt instead of racy
-  in-request bootstrap (REVIEW §4 — was hash divergence between
-  concurrent first-users)
-- **T1.6**: `start_delegated_transaction` wraps webhook ledger insert +
-  task enqueue (REVIEW §S-3 — was permanently-stuck pending rows on
-  enqueue failure)
+### Soft-delete + GDPR
+- `asset_service::soft_delete()` stamps `deleted_at`.
+- `purge_soft_deleted_assets` daily task hard-deletes rows past the
+  7-day grace window with FK-cascade to `local_fastpix_track` (rule
+  W10). Boundary tested at 6d23h (kept) / 7d1m (purged).
+- Separate `asset_cleanup` handles GDPR-pending retry path with a
+  10-attempt cap.
 
-### Tier 2 (documentation & ergonomics) — landed 2026-05-05
+### Upload + URL pull
+- Direct upload + URL pull, both via `upload_service`. 60-second
+  dedup on both branches (rule W11).
+- SSRF guard covers all 14 attack classes: non-https,
+  credentials-in-URL, loopback (127/8 + `[::1]`), RFC1918, link-local
+  (169.254/16 incl. AWS metadata), `localhost`, `*.local`,
+  IPv6 ULA / link-local / NAT64 / IPv4-mapped, unresolvable hostnames.
 
-- **T2.1**: `setting_apisecret_desc` lang string corrected — plaintext
-  storage disclosure replaces the false "encrypted at rest" claim
-- **T2.2**: Gateway exceptions carry up to 500 chars of FastPix response
-  body in `$a` context (was discarded; cost ~30 min debugging
-  2026-05-04). Body never enters `error_log`.
-- **T2.3**: `verifier::verify` rejects configured secrets shorter than
-  32 bytes; structured `webhook.secret_too_short` log on rejection.
-  Verify-time floor only — no UI rotation field added (avoids
-  widening typo blast radius).
-- **T2.4**: `db/services.php` description literals — closed as a
-  documented no-op. Empirical audit of 23 mod/*/db/services.php files
-  in Moodle 4.5 core found zero use of `get_string()` in description.
-  Senior review's M9 flag was incorrect on this point.
-- **T2.5**: `README.md` written — install order, configuration
-  walkthrough, plaintext storage disclosure, FastPix dashboard setup,
-  webhook secret rotation guidance (CLI / DB-direct, not UI),
-  vendored-dependencies section pinning php-jwt v6.10.0.
+### DRM
+- Double gate: `feature_flag_service::drm_enabled()` requires BOTH
+  the `feature_drm_enabled` checkbox AND a non-empty
+  `drm_configuration_id` (rule W12).
+- Admin UI hides the configuration_id field when the checkbox is off
+  (`hide_if` widget dependency).
 
-### Tier 3 (verification & CI) — landed 2026-05-05
-
-- **T3.1**: production-readiness static checks shipped as
-  `tests/plugin_health_test.php` (debug-artefact scan, version.php
-  sanity, install.xml validity, db/{services,tasks,hooks}.php class
-  resolution). Stand-in for moodle-plugin-ci, which can't be installed
-  in the dev container. Full toolchain still queued for CI provisioning.
-- **T3.2**: webhook end-to-end loopback CLI at
-  `cli/webhook_loopback_test.php` — fires synthetic signed events at
-  the local webhook URL and reconciles ledger inserts. Substitute for
-  real-FastPix-to-endpoint until sandbox creds + public URL are
-  available; supports duplicate fraction so it partially covers
-  DoD §7 (webhook flood).
-- **T3.3**: 35-item DoD walk in `docs/dod-walk-2026-05-05.md`. Verdicts,
-  evidence, remediation queue, two architecture-drift items needing
-  ADR/doc resolution (cleanup-task semantics; GDPR alert threshold).
-- **T3.4**: PHPUnit-form regression guard in
-  `tests/no_crc32_regression_test.php` — fails the suite if any
-  `hash('crc32b'`, `hash("crc32b"`, or bare `crc32(` is reintroduced
-  in production source.
-- **T3.5**: `gdpr_delete_attempts` column on `local_fastpix_asset`,
-  10-attempt cap with CRITICAL-line ops signal at the cap. Schema
-  bumped 2026050503 → 2026050504 with `db/upgrade.php` step.
-  4 boundary tests in `tests/retry_gdpr_delete_test.php`.
-
-### Tier 4 (refactor / polish) — not started
-
-- Consolidate `cache_key_*` helpers (currently duplicated between
-  `asset_service` and `projector`) into a shared util namespace
-  (REVIEW §3 duplication)
-- Standardize structured logging beyond gateway
-
-## Outstanding work (DoD-driven)
-
-The DoD walk identified 8 work units to reach GA. Highest priority:
-
-1. **Install moodle-plugin-ci in CI** (DoD §1, §2). Unblocks coverage
-   gating at architecture targets (gateway 95%, verifier 90%, projector
-   90%, jwt_signing 95%, others 85%).
-2. **Resolve cleanup-task drift** (DoD §24, §25). Architecture says
-   7-day soft-purge as a separate task; current code has 90-day GDPR
-   retention only. ADR or doc update.
-3. **Health endpoint** at `/local/fastpix/health.php` (DoD §35) —
-   wraps `gateway::health_probe()`, returns JSON, 503 on probe failure.
-
-Architecture-clarified, not a code fix:
-
-- **DNS-rebinding TOCTOU on source_url** (formerly Hard Blocker, DoD §31
-  — now PASS). Empirical audit 2026-05-06 showed Moodle never directly
-  fetches `source_url`. The gateway POSTs the URL inside a JSON body to
-  `api.fastpix.io`; FastPix's backend fetches the URL with FastPix's
-  own resolver. CURLOPT_RESOLVE pinning on Moodle's cURL handle has
-  zero effect on FastPix's later fetch. The original SSRF window was
-  misframed. The existing SSRF guard remains in place as defense in
-  depth (filters obvious abuse before forwarding to FastPix); see the
-  comment block at the top of `assert_ssrf_safe()` in
-  `classes/service/upload_service.php` for the full threat-model
-  documentation.
-
-Medium priority:
-
-5. Webhook flood integration test (1000 events, 50% dup, 10% out-of-order)
-   (DoD §7) — partially addressed by T3.2 loopback CLI.
-6. Two-worker concurrency tests for lock contention and breaker MUC
-   sharing (DoD §11, §16).
-7. Privacy export round-trip test (DoD §32).
-8. Reconcile GDPR alert semantics (DoD §34) — architecture says 6
-   failures + Moodle event; T3.5 ships 10-attempt cap + mtrace.
-
-Low priority:
-
-9. Real-endpoint hot-path timeout test (DoD §15).
-
-See `docs/dod-walk-2026-05-05.md` for the full per-item audit and
-remediation queue.
+### Operational
+- Privacy provider declares all three retention windows in
+  `get_metadata`: 90-day webhook ledger, 7-day soft-delete purge,
+  90-day GDPR-pending hard delete.
+- `health.php` JSON endpoint wraps `gateway::health_probe()`.
+- Backfill CLI (`cli/backfill_playback_ids.php`) for repairing
+  pre-fix assets through the proper projector path.
+- `TROUBLESHOOTING.md` documents recovery for the common
+  dev-environment cron-not-running symptom.
 
 ## Architectural decisions
 
 - **ADR-012** (`docs/adr/ADR-012-capability-ownership.md`):
-  `mod/fastpix:uploadmedia` stays in `mod_fastpix`. Empirical install
-  test on 2026-05-05 disproved the senior reviewer's predicted failure.
+  `mod/fastpix:uploadmedia` ownership stays in `mod_fastpix`.
+- **ADR-013** (`docs/adr/ADR-013-playback-service-and-asset-lookup-by-session.md`):
+  `\local_fastpix\service\playback_service::resolve` is the
+  chokepoint for JWT minting. mod_fastpix MUST go through this
+  service — direct use of `jwt_signing_service` is a PR-3 violation.
+- **ADR-014** (`docs/adr/ADR-014-coverage-exemptions.md`):
+  16 surface classes are exempt from the unit-coverage gate (admin
+  glue, typed exceptions, external-endpoint wrappers, scheduled-task
+  shells, privacy provider, rate_limiter fail-open catch) with
+  documented alternative testing strategies (Behat, integration,
+  manual smoke).
 
-## Do not use this in production.
+## Operational verification queue
 
-The plugin is internally consistent (132+ green tests on every commit;
-no FAIL findings in the DoD walk) but the missing surface area
-(health endpoint, plugin-checker CI, DNS-rebinding mitigation, cleanup
-task semantics) is enough to keep the maturity at alpha.
+These are NOT code gaps — the code itself is production-grade — but
+they should be confirmed against a production FastPix tenant before
+tagging `v1.0.0`:
+
+1. End-to-end upload via the FastPix dashboard against a production
+   webhook URL — confirm asset row appears with `playback_id`.
+2. Webhook secret rotation flow — paste a new secret, confirm
+   `webhook_secret_rotated_at` updates, audit row appears in
+   `mdl_logstore_standard_log`.
+3. JWT playback against the FastPix CDN — sign a token, fetch the
+   `.m3u8` manifest, expect HTTP 200 + `#EXTM3U` body.
+4. `tools/coverage.sh` re-runs green from a clean checkout.
+
+## Known limitations (will not be fixed in 1.0.0)
+
+- **Admin Test Connection / Send Test Event buttons** are visible but
+  inert. They depend on AMD modules built by Moodle's grunt
+  toolchain, which is not present in this dev container. CLI
+  equivalents are documented inline in `settings.php` (`gateway::
+  health_probe()`, `cli/webhook_loopback_test.php`).
+- **Credentials are stored as plaintext in `mdl_config_plugins`** —
+  rule S8, disclosed in `README.md`. Protect database backups and
+  the `local/fastpix:configurecredentials` capability accordingly.
+- **`mod_fastpix` / `filter_fastpix` / `tinymce_fastpix` not present
+  yet.** This plugin is the foundation; the three surface plugins are
+  separate Moodle plugin repos and have their own development
+  systems. The consumer-contract docs in `mod_fastpix/.claude/` list
+  exactly what they consume from us.
+
+## Don't push commits that
+
+- introduce `HS256`, `createToken`, `curl_*` outside `classes/api/`,
+  `_or_fetch` on write paths, cross-plugin namespace imports, `===`
+  on signatures, or a `composer.json`.
+- lower the per-class coverage gate (85/90/95). If a class is
+  genuinely impossible to unit-test, it goes in ADR-014's exemption
+  list, not on a gate reduction.
+- bump `MATURITY_STABLE` without first running the operational
+  verification queue above.

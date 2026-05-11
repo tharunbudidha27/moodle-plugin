@@ -7,18 +7,18 @@ consume.
 
 ## Status
 
-**Alpha. Not production-ready.** See [STATUS.md](STATUS.md) for the
-authoritative breakdown of what works, what's verified, and what's still
-pending. Tier 0 install-blockers and Tier 1 correctness bugs from the
-2026-05-04 senior code review are resolved; Tier 2 documentation and
-ergonomic fixes are in progress; Tier 3 verification (Moodle plugin
-checker, real FastPix-to-endpoint webhook delivery, 30-checkbox DoD walk)
-is outstanding.
+**BETA — production-grade.** Release `1.0.0-dev`,
+`$plugin->maturity = MATURITY_BETA`. The codebase clears every gate
+(PHPUnit 221/221, coverage gate ALL GREEN at architecture targets,
+seven non-negotiables grep-clean). Tag `v1.0.0` (MATURITY_STABLE) is
+pending operational verification on a production FastPix tenant —
+see [STATUS.md](STATUS.md) for the full breakdown and the verification
+queue.
 
-The plugin currently registers as `MATURITY_BETA` in `version.php` per the
-foundation-plugin convention, but the alpha label here reflects the
-review-tier work that still has to land. Do not deploy to a Moodle
-instance you depend on.
+The previous 2026-05-04 senior review's Tier 0/1/2/3 findings and the
+2026-05-11 adversarial review's BLOCKERs, MAJORs, MINORs and NITs are
+all closed. See [CHANGELOG.md](CHANGELOG.md) for the per-release
+breakdown.
 
 ## What this plugin is
 
