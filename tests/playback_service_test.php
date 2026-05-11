@@ -54,8 +54,8 @@ class playback_service_test extends \advanced_testcase {
         $payload = playback_service::resolve($asset->fastpix_id, 42);
 
         $this->assertSame($asset->playback_id, $payload->playback_id);
-        $this->assertNotEmpty($payload->jwt);
-        $this->assertGreaterThan(time(), $payload->expires_at);
+        $this->assertNotEmpty($payload->playback_token);
+        $this->assertGreaterThan(time(), $payload->expires_at_ts);
         $this->assertFalse($payload->drm_required);
     }
 
