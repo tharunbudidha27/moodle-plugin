@@ -4,7 +4,25 @@ All notable changes to `local_fastpix` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.0.0] — 2026-05-12
+
+End-to-end production-verified against the FastPix sandbox. Maturity
+bumped from BETA → STABLE.
+
+### Added
+- Real-FastPix verification record on 2026-05-12: URL pull → webhook
+  ingestion → asset projection → JWT minting with RS256 +
+  `aud=media:<playback_id>` — all subsystems green against a live
+  FastPix tenant.
+
+### Fixed
+- `credential_service::ensure_signing_key()` — read
+  `$response->data->id` (FastPix's `{success, data}` envelope) instead
+  of `$response->id`, and detect whether `privateKey` arrived
+  base64-encoded vs raw to avoid double-encoding. Both bugs were
+  masked by unit-test mocks; only exercised end-to-end on a real
+  FastPix call. Empty-value guard added so a failed parse no longer
+  silently overwrites config rows.
 
 ## [1.0.0-dev] — 2026-05-11
 
