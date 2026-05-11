@@ -49,20 +49,36 @@ if (!has_capability('local/fastpix:configurecredentials', context_system::instan
  * @param string $descriptionkey Lang string key for the muted descriptor.
  * @return string
  */
+/**
+ * Build the HTML for an inline admin button + status pair + an inline
+ * <script> tag that wires a click handler. Uses native fetch() against
+ * /lib/ajax/service.php (the same endpoint Moodle's core/ajax AMD
+ * module uses) so we don't depend on the AMD loader — which has been
+ * unreliable enough on this dev stack to break sibling admin widgets.
+ *
+ * @param string $buttonid        DOM id of the button.
+ * @param string $statusid        DOM id of the status span.
+ * @param string $labelkey        Lang string key for the button label.
+ * @param string $descriptionkey  Lang string key for the muted descriptor.
+ * @param string $methodname      Moodle external function name to invoke.
+ * @param string $successtpl      JS template; {$a} replaced with success field.
+ * @param string $successfield    Result field used in success line (e.g. 'latency_ms').
+ * @return string
+ */
 $local_fastpix_button_html = static function (
     string $buttonid,
     string $statusid,
     string $labelkey,
     string $descriptionkey,
+    string $methodname,
+    string $successtpl,
+    string $successfield,
 ): string {
     $button = \html_writer::tag('button', get_string($labelkey, 'local_fastpix'), [
         'id'    => $buttonid,
         'type'  => 'button',
         'class' => 'btn btn-secondary',
     ]);
-    // ml-2 = Bootstrap 4 (Moodle 4.5 boost default); ms-2 = Bootstrap 5
-    // (future themes). Include both class names; unknown classes are
-    // ignored.
     $status = \html_writer::tag('span', '', [
         'id'    => $statusid,
         'class' => 'ml-2 ms-2 local-fastpix-status',
@@ -71,7 +87,75 @@ $local_fastpix_button_html = static function (
         get_string($descriptionkey, 'local_fastpix'),
         ['class' => 'form-text text-muted'],
     );
-    return $button . ' ' . $status . $description;
+
+    // Inline <script> binding. Reads sesskey from M.cfg.sesskey (always
+    // available on admin pages). All JSON encoding via PHP-side
+    // json_encode so we don't smuggle user input into JS.
+    $args = [
+        'buttonId'     => $buttonid,
+        'statusId'     => $statusid,
+        'methodname'   => $methodname,
+        'successTpl'   => $successtpl,
+        'successField' => $successfield,
+    ];
+    $argsjson = json_encode($args, JSON_HEX_TAG | JSON_HEX_QUOT | JSON_HEX_AMP);
+    $script = <<<SCRIPT
+<script>
+(function() {
+    var cfg = {$argsjson};
+    function bind() {
+        var btn = document.getElementById(cfg.buttonId);
+        var status = document.getElementById(cfg.statusId);
+        if (!btn || !status || btn.dataset.fpBound === '1') return;
+        btn.dataset.fpBound = '1';
+        btn.addEventListener('click', function() {
+            status.textContent = 'Working…';
+            status.style.color = '';
+            btn.disabled = true;
+            var payload = [{index: 0, methodname: cfg.methodname, args: {}}];
+            var sesskey = (window.M && window.M.cfg && window.M.cfg.sesskey) || '';
+            var url = M.cfg.wwwroot + '/lib/ajax/service.php?sesskey=' + encodeURIComponent(sesskey)
+                    + '&info=' + encodeURIComponent(cfg.methodname);
+            fetch(url, {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            }).then(function(r) { return r.json(); })
+              .then(function(rs) {
+                  btn.disabled = false;
+                  var r = rs && rs[0];
+                  if (r && r.error) {
+                      status.textContent = 'Failed: ' + (r.exception ? r.exception.message : r.error);
+                      status.style.color = 'red';
+                      return;
+                  }
+                  var data = r && r.data;
+                  if (data && data.success) {
+                      status.textContent = cfg.successTpl.replace('{\$a}', String(data[cfg.successField]));
+                      status.style.color = 'green';
+                  } else {
+                      var msg = (data && (data.error || (data.errors && data.errors.join(', ')) || data.result)) || 'unknown';
+                      status.textContent = 'Failed: ' + msg;
+                      status.style.color = 'red';
+                  }
+              }).catch(function(err) {
+                  btn.disabled = false;
+                  status.textContent = 'Failed: ' + (err && err.message || err);
+                  status.style.color = 'red';
+              });
+        });
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', bind);
+    } else {
+        bind();
+    }
+})();
+</script>
+SCRIPT;
+
+    return $button . ' ' . $status . $description . $script;
 };
 
 // ---- 1. API credentials ---------------------------------------------------
@@ -87,7 +171,7 @@ $settings->add(new admin_setting_configtext(
     new lang_string('setting_apikey', 'local_fastpix'),
     new lang_string('setting_apikey_desc', 'local_fastpix'),
     '',
-    PARAM_ALPHANUMEXT,
+    PARAM_RAW_TRIMMED,
 ));
 
 // Plain text input instead of admin_setting_configpasswordunmask. The
@@ -115,21 +199,11 @@ $settings->add(new admin_setting_description(
         $btn_test_connection_status_id,
         'button_test_connection',
         'button_test_connection_desc',
+        'local_fastpix_test_connection',
+        'Connected (latency {$a} ms)',
+        'latency_ms',
     ),
 ));
-// Button JS binding intentionally NOT loaded here. The grunt-built AMD
-// bundle is hand-crafted (no node toolchain in the dev container) and
-// historically cascades into Moodle's first.js bootstrap, breaking the
-// admin password-unmask widget on this same page. Restore the
-// js_call_amd line below once amd/build/test_connection.min.js is
-// produced by `npx grunt amd --root=local/fastpix` on a host with node.
-//
-// Until then the button is visual-only; ops can drive the same probe
-// via:
-//   docker exec moodle-docker-webserver-1 php -r '
-//     define("CLI_SCRIPT", true); require "config.php";
-//     echo \\local_fastpix\\api\\gateway::instance()->health_probe() ? "OK\n" : "FAIL\n";
-//   '
 
 // ---- 2. Upload defaults ---------------------------------------------------
 
@@ -185,7 +259,7 @@ $settings->add(new admin_setting_configtext(
     new lang_string('setting_drm_config_id', 'local_fastpix'),
     new lang_string('setting_drm_config_id_desc', 'local_fastpix'),
     '',
-    PARAM_ALPHANUMEXT,
+    PARAM_RAW_TRIMMED,
 ));
 
 // Hide the DRM config id when the DRM feature flag is OFF (rule W12 double
@@ -253,8 +327,8 @@ $settings->add(new admin_setting_description(
         $btn_send_event_status_id,
         'button_send_test_event',
         'button_send_test_event_desc',
+        'local_fastpix_send_test_event',
+        'Test event delivered (ledger id {$a})',
+        'ledger_id',
     ),
 ));
-// Send-test-event JS binding likewise pending a real grunt build.
-// CLI equivalent:
-//   docker exec moodle-docker-webserver-1 php local/fastpix/cli/webhook_loopback_test.php --count=1
