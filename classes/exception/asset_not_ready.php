@@ -10,6 +10,6 @@ defined('MOODLE_INTERNAL') || die();
  */
 class asset_not_ready extends \moodle_exception {
     public function __construct(string $context = '') {
-        parent::__construct('exception_asset_not_ready', 'local_fastpix', '', $context);
+        parent::__construct('asset_not_ready', 'local_fastpix', '', $context);
     }
 }
