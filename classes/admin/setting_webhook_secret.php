@@ -30,7 +30,14 @@ defined('MOODLE_INTERNAL') || die();
  * swallows audit failures; ops will see the missing event but the
  * persisted state is correct.
  */
-class setting_webhook_secret extends \admin_setting_configpasswordunmask {
+/**
+ * Extends \admin_setting_configtext (NOT \admin_setting_configpasswordunmask)
+ * because the passwordunmask widget depends on a JS-driven affordance that
+ * is unreliable in some Moodle / theme combinations. The webhook secret is
+ * stored as plaintext in mdl_config_plugins regardless of the widget (rule
+ * S8 — documented in README.md), so the visual mask was cosmetic.
+ */
+class setting_webhook_secret extends \admin_setting_configtext {
 
     /** Minimum acceptable length, mirroring verifier::MIN_SECRET_BYTES. */
     private const MIN_LEN = 32;

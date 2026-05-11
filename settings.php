@@ -90,11 +90,19 @@ $settings->add(new admin_setting_configtext(
     PARAM_ALPHANUMEXT,
 ));
 
-$settings->add(new admin_setting_configpasswordunmask(
+// Plain text input instead of admin_setting_configpasswordunmask. The
+// passwordunmask widget depends on the core_admin/show_unmask_password
+// AMD module to bind its "click to edit" affordance; in our dev stack
+// that JS chain is intermittently broken, leaving the field inert.
+// The secret is stored as plaintext in mdl_config_plugins regardless
+// of the widget (rule S8 — already disclosed in README.md), so the
+// visual mask was cosmetic. The text input is always editable.
+$settings->add(new admin_setting_configtext(
     'local_fastpix/apisecret',
     new lang_string('setting_apisecret', 'local_fastpix'),
     new lang_string('setting_apisecret_desc', 'local_fastpix'),
     '',
+    PARAM_RAW_TRIMMED,
 ));
 
 $btn_test_connection_id = 'local_fastpix_test_connection_btn';
