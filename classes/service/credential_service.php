@@ -83,11 +83,32 @@ class credential_service {
 
             $response = ($this->gateway ?? \local_fastpix\api\gateway::instance())->create_signing_key();
 
-            $new_kid = (string)($response->id ?? '');
-            $new_pem = (string)($response->privateKey ?? '');
+            // FastPix wraps the response: {"success": true, "data": {"id": ..., "privateKey": ...}}
+            // Unit-test mocks sometimes return the unwrapped shape; accept both.
+            $payload = $response->data ?? $response;
+            $new_kid = (string)($payload->id ?? '');
+            $new_pem_field = (string)($payload->privateKey ?? '');
 
-            set_config('signing_key_id', $new_kid, 'local_fastpix');
-            set_config('signing_private_key', base64_encode($new_pem), 'local_fastpix');
+            if ($new_kid === '' || $new_pem_field === '') {
+                throw new \local_fastpix\exception\signing_key_missing(
+                    'gateway returned empty kid or privateKey field'
+                );
+            }
+
+            // FastPix returns privateKey ALREADY base64-encoded. Some unit-test
+            // mocks return a raw PEM string. Normalize so what we store is
+            // exactly one base64 layer over a real PEM — which jwt_signing_service
+            // can decode and feed straight into openssl_pkey_get_private().
+            $decoded_once = base64_decode($new_pem_field, true);
+            $looks_like_pem = $decoded_once !== false
+                && str_contains($decoded_once, '-----BEGIN');
+            $new_pem_b64 = $looks_like_pem
+                ? $new_pem_field                      // already base64'd PEM — store as-is.
+                : base64_encode($new_pem_field);      // raw PEM (test mock) — encode once.
+
+            set_config('signing_key_id',         $new_kid,     'local_fastpix');
+            set_config('signing_private_key',    $new_pem_b64, 'local_fastpix');
+            set_config('signing_key_created_at', time(),       'local_fastpix');
 
             // Log only the kid; the private key never appears in any log line (S2).
             error_log(json_encode([
