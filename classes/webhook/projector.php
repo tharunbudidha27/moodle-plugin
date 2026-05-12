@@ -75,7 +75,7 @@ class projector {
         }
 
         $row->last_event_id = (string)$event->id;
-        $row->last_event_at = (int)$event->occurredAt;
+        $row->last_event_at = $this->event_timestamp($event);
         $row->timemodified  = time();
         $DB->update_record(self::TABLE, $row);
 
@@ -94,6 +94,29 @@ class projector {
     }
 
     /**
+     * Resolve the event's wall-clock timestamp.
+     *
+     * Synthetic test fixtures use `occurredAt` (epoch int).
+     * Real FastPix deliveries use `createdAt` (ISO 8601 with nanoseconds,
+     * e.g. "2026-05-11T20:42:16.361817248Z"). PHP's strtotime() rejects
+     * nanosecond precision on some builds and returns false; we strip
+     * the fractional component before parsing to be safe.
+     *
+     * Returns 0 only when no parseable timestamp is present.
+     */
+    private function event_timestamp(\stdClass $event): int {
+        if (isset($event->occurredAt) && is_numeric($event->occurredAt)) {
+            return (int)$event->occurredAt;
+        }
+        if (isset($event->createdAt)) {
+            $iso = preg_replace('/\.\d+/', '', (string)$event->createdAt);
+            $ts = strtotime($iso);
+            return $ts !== false ? $ts : 0;
+        }
+        return 0;
+    }
+
+    /**
      * Total ordering with lex tiebreak on event_id.
      */
     private function is_out_of_order(\stdClass $event, \stdClass $row): bool {
@@ -101,7 +124,7 @@ class projector {
             return false;
         }
 
-        $event_at = (int)$event->occurredAt;
+        $event_at = $this->event_timestamp($event);
         $last_at  = (int)$row->last_event_at;
 
         if ($event_at < $last_at) {
