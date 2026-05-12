@@ -68,12 +68,14 @@ class gateway {
         array $metadata,
         string $access_policy,
         ?string $drm_config_id,
+        string $max_resolution = '1080p',
     ): \stdClass {
         $body = [
             'corsOrigin'   => '*',
             'pushMediaSettings' => [
-                'metadata'     => $metadata,
-                'accessPolicy' => $access_policy,
+                'metadata'      => $metadata,
+                'accessPolicy'  => $access_policy,
+                'maxResolution' => $max_resolution,
             ],
         ];
         if ($drm_config_id !== null && $drm_config_id !== '') {
@@ -98,11 +100,13 @@ class gateway {
         array $metadata,
         string $access_policy,
         ?string $drm_config_id,
+        string $max_resolution = '1080p',
     ): \stdClass {
         $body = [
-            'inputs' => [['type' => 'video', 'url' => $source_url]],
-            'metadata'     => $metadata,
-            'accessPolicy' => $access_policy,
+            'inputs'        => [['type' => 'video', 'url' => $source_url]],
+            'metadata'      => $metadata,
+            'accessPolicy'  => $access_policy,
+            'maxResolution' => $max_resolution,
         ];
         if ($drm_config_id !== null && $drm_config_id !== '') {
             $body['drmConfigurationId'] = $drm_config_id;

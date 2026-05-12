@@ -26,6 +26,8 @@ class upload_service {
         int $userid,
         array $metadata,
         bool $drm_required = false,
+        ?string $access_policy = null,
+        ?string $max_resolution = null,
     ): \stdClass {
         $this->assert_drm_gate($drm_required);
 
@@ -42,9 +44,10 @@ class upload_service {
             }
         }
 
-        $owner_hash = $this->owner_hash($userid);
-        $access_policy = $drm_required ? 'drm' : 'private';
-        $drm_config_id = $drm_required
+        $owner_hash      = $this->owner_hash($userid);
+        $access_policy   = $this->resolve_access_policy($drm_required, $access_policy);
+        $max_resolution  = $this->resolve_max_resolution($max_resolution);
+        $drm_config_id   = $access_policy === 'drm'
             ? feature_flag_service::instance()->drm_configuration_id()
             : null;
 
@@ -58,6 +61,7 @@ class upload_service {
             $fastpix_metadata,
             $access_policy,
             $drm_config_id,
+            $max_resolution,
         );
 
         $upload_id = (string)($response->data->uploadId ?? $response->uploadId ?? '');
@@ -79,6 +83,8 @@ class upload_service {
         int $userid,
         string $source_url,
         bool $drm_required = false,
+        ?string $access_policy = null,
+        ?string $max_resolution = null,
     ): \stdClass {
         // SSRF guard runs BEFORE any gateway call (rule S6).
         $this->assert_ssrf_safe($source_url);
@@ -97,9 +103,10 @@ class upload_service {
             }
         }
 
-        $owner_hash = $this->owner_hash($userid);
-        $access_policy = $drm_required ? 'drm' : 'private';
-        $drm_config_id = $drm_required
+        $owner_hash      = $this->owner_hash($userid);
+        $access_policy   = $this->resolve_access_policy($drm_required, $access_policy);
+        $max_resolution  = $this->resolve_max_resolution($max_resolution);
+        $drm_config_id   = $access_policy === 'drm'
             ? feature_flag_service::instance()->drm_configuration_id()
             : null;
 
@@ -114,6 +121,7 @@ class upload_service {
             $fastpix_metadata,
             $access_policy,
             $drm_config_id,
+            $max_resolution,
         );
 
         $upload_id = (string)($response->data->id ?? $response->id ?? '');
@@ -162,6 +170,51 @@ class upload_service {
             'fastpix_id' => $row->fastpix_id !== null ? (string)$row->fastpix_id : '',
             'expires_at' => (int)$row->expires_at,
         ];
+    }
+
+    /**
+     * Resolve effective access_policy for an upload.
+     *
+     *   1. drm_required=true     → 'drm' (explicit DRM intent always wins)
+     *   2. caller-passed value   → caller's choice (per-call override)
+     *   3. admin config default  → default_access_policy (set in settings)
+     *   4. hard-coded fallback   → 'private' (defensive — fail closed)
+     *
+     * Whitelist enforced: anything other than public/private/drm coming
+     * from config or caller falls back to 'private'.
+     */
+    private function resolve_access_policy(bool $drm_required, ?string $caller_value): string {
+        if ($drm_required) {
+            return 'drm';
+        }
+        $allowed = ['public', 'private', 'drm'];
+        if ($caller_value !== null && $caller_value !== '' && in_array($caller_value, $allowed, true)) {
+            return $caller_value;
+        }
+        $configured = (string)get_config('local_fastpix', 'default_access_policy');
+        if (in_array($configured, $allowed, true)) {
+            return $configured;
+        }
+        return 'private';
+    }
+
+    /**
+     * Resolve effective max_resolution for an upload.
+     *
+     *   1. caller-passed value   → caller's choice
+     *   2. admin config default  → max_resolution (set in settings)
+     *   3. hard-coded fallback   → '1080p'
+     */
+    private function resolve_max_resolution(?string $caller_value): string {
+        $allowed = ['480p', '720p', '1080p', '1440p', '2160p'];
+        if ($caller_value !== null && $caller_value !== '' && in_array($caller_value, $allowed, true)) {
+            return $caller_value;
+        }
+        $configured = (string)get_config('local_fastpix', 'max_resolution');
+        if (in_array($configured, $allowed, true)) {
+            return $configured;
+        }
+        return '1080p';
     }
 
     private function assert_drm_gate(bool $drm_required): void {
