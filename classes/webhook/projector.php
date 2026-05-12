@@ -55,7 +55,20 @@ class projector {
         $event_type = (string)($event->type ?? '');
 
         if ($row === false) {
-            if ($event_type === 'video.media.created') {
+            // Real FastPix direct uploads never emit `video.media.created`;
+            // they go straight from `video.media.upload` (no asset yet) to
+            // `video.upload.media_created` (asset exists, has playbackIds)
+            // to `video.media.ready`. Out-of-order delivery may also drop the
+            // earlier of those two. Accept any of these as a row-insert trigger
+            // — `video.media.upload` is the only one that does NOT carry the
+            // asset shape and is skipped (the next event will create the row).
+            $insert_triggers = [
+                'video.media.created',
+                'video.upload.media_created',
+                'video.media.ready',
+                'video.media.updated',
+            ];
+            if (in_array($event_type, $insert_triggers, true)) {
                 $row = $this->insert_from_created_event($event, $fastpix_id);
             } else {
                 debugging(
@@ -213,7 +226,7 @@ class projector {
             'playback_id'            => null,
             'owner_userid'           => 0, // sentinel
             'title'                  => (string)($data->title ?? "Asset {$fastpix_id}"),
-            'duration'               => $data->duration ?? null,
+            'duration'               => $this->parse_duration($data->duration ?? null),
             'status'                 => (string)($data->status ?? 'created'),
             'access_policy'          => (string)($data->accessPolicy ?? 'private'),
             'drm_required'           => 0,

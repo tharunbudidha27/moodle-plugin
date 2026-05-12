@@ -308,11 +308,10 @@ class projector_test extends \advanced_testcase {
         $this->assertSame(0, $DB->count_records(self::TABLE));
     }
 
-    public function test_project_warns_on_event_for_unknown_asset_non_created_type(): void {
+    public function test_project_warns_on_event_for_unknown_asset_non_insert_trigger(): void {
         global $DB;
-        $event = $this->ready_event('media-unknown', [
-            (object)['id' => 'pb-unknown', 'accessPolicy' => 'private'],
-        ]);
+        // `video.media.deleted` is not an insert trigger — must warn and drop.
+        $event = $this->build_event('video.media.deleted', 'media-unknown');
 
         (new projector())->project($event);
 
@@ -484,6 +483,45 @@ JSON);
         $row = $DB->get_record(self::TABLE, ['fastpix_id' => 'media-upd']);
         $this->assertSame('ready', $row->status);
         $this->assertEqualsWithDelta(90.0, (float)$row->duration, 0.001);
+    }
+
+    // ---- Cold-start insert from non-`video.media.created` triggers --------
+
+    public function test_video_upload_media_created_inserts_when_asset_absent(): void {
+        global $DB;
+        $fxid = 'media-cold-upmc';
+        $event = $this->build_event('video.upload.media_created', $fxid, [
+            'data' => (object)[
+                'playbackIds' => [(object)['id' => 'pb-cold-upmc', 'accessPolicy' => 'public']],
+            ],
+        ]);
+        (new projector())->project($event);
+        $row = $DB->get_record(self::TABLE, ['fastpix_id' => $fxid]);
+        $this->assertNotFalse($row, 'asset row must be inserted by video.upload.media_created');
+        $this->assertSame('pb-cold-upmc', $row->playback_id);
+        $this->assertSame('public', $row->access_policy);
+    }
+
+    public function test_video_media_ready_inserts_when_asset_absent(): void {
+        global $DB;
+        $fxid = 'media-cold-ready';
+        $event = $this->ready_event($fxid, [(object)['id' => 'pb-cold-ready', 'accessPolicy' => 'public']]);
+        (new projector())->project($event);
+        $row = $DB->get_record(self::TABLE, ['fastpix_id' => $fxid]);
+        $this->assertNotFalse($row);
+        $this->assertSame('ready', $row->status);
+        $this->assertSame('pb-cold-ready', $row->playback_id);
+        $this->assertSame('public', $row->access_policy);
+    }
+
+    public function test_video_media_upload_for_unknown_asset_is_dropped(): void {
+        global $DB;
+        $event = $this->build_event('video.media.upload', 'media-cold-upload', [
+            'data' => (object)['status' => 'waiting'],
+        ]);
+        (new projector())->project($event);
+        $this->assertFalse($DB->get_record(self::TABLE, ['fastpix_id' => 'media-cold-upload']));
+        $this->assertDebuggingCalled();
     }
 
     // ---- Redaction canary (S2) -------------------------------------------
